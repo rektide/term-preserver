@@ -2,6 +2,7 @@
 
 mod config;
 mod osc;
+mod prompt;
 mod proxy;
 mod signals;
 mod terminal;
