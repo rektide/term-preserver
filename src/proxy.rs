@@ -3,13 +3,15 @@
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::config::Config;
+use crate::osc::TitleObserver;
 use crate::terminal;
 
 const BUF_SIZE: usize = 8192;
 
+#[allow(dead_code)]
 pub fn copy_retrying_eintr<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
@@ -23,6 +25,34 @@ pub fn copy_retrying_eintr<R: Read, W: Write>(
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         };
+        writer.write_all(&buf[..n])?;
+        writer.flush()?;
+        total += n as u64;
+    }
+}
+
+pub fn copy_pty_to_stdout_with_titles<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    title_state: Arc<Mutex<Option<String>>>,
+) -> io::Result<u64> {
+    let mut observer = TitleObserver::new();
+    let mut buf = [0u8; BUF_SIZE];
+    let mut total: u64 = 0;
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) => return Ok(total),
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        for &byte in &buf[..n] {
+            if let Some(title) = observer.advance(byte) {
+                if let Ok(mut guard) = title_state.lock() {
+                    *guard = Some(title);
+                }
+            }
+        }
         writer.write_all(&buf[..n])?;
         writer.flush()?;
         total += n as u64;
@@ -84,7 +114,7 @@ unsafe fn dup_fd(fd: std::os::fd::RawFd) -> eyre::Result<std::os::fd::RawFd> {
     }
 }
 
-pub fn run(config: Config) -> eyre::Result<i32> {
+pub fn run(config: Config) -> eyre::Result<(i32, Arc<Mutex<Option<String>>>)> {
     if config.command.is_empty() {
         eyre::bail!("no command specified");
     }
@@ -105,6 +135,7 @@ pub fn run(config: Config) -> eyre::Result<i32> {
     let _guard = terminal::RawTerminalGuard::enable(&io::stdin())?;
 
     let child_alive = Arc::new(AtomicBool::new(true));
+    let title_state: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let stdin_fd = io::stdin().as_raw_fd();
 
     let pty_write_fd = unsafe { dup_fd(pty.as_raw_fd())? };
@@ -118,10 +149,11 @@ pub fn run(config: Config) -> eyre::Result<i32> {
         copy_stdin_to_pty_until_cancelled(stdin_fd, &mut pty_writer, &alive_for_stdin)
     });
 
+    let title_state_for_thread = title_state.clone();
     let stdout_thread = std::thread::spawn(move || {
         let mut pty_reader = unsafe { std::fs::File::from_raw_fd(pty_read_fd) };
         let mut stdout = io::stdout();
-        copy_retrying_eintr(&mut pty_reader, &mut stdout)
+        copy_pty_to_stdout_with_titles(&mut pty_reader, &mut stdout, title_state_for_thread)
     });
 
     let exit_status = child.wait()?;
@@ -141,16 +173,16 @@ pub fn run(config: Config) -> eyre::Result<i32> {
     }
 
     match exit_status.code() {
-        Some(code) => Ok(code),
+        Some(code) => Ok((code, title_state)),
         None => {
             #[cfg(unix)]
             {
                 use std::os::unix::process::ExitStatusExt;
-                Ok(128 + exit_status.signal().unwrap_or(0))
+                Ok((128 + exit_status.signal().unwrap_or(0), title_state))
             }
             #[cfg(not(unix))]
             {
-                Ok(1)
+                Ok((1, title_state))
             }
         }
     }
