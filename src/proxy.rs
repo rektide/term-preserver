@@ -13,6 +13,8 @@ use crate::prompt;
 use crate::signals;
 use crate::terminal;
 
+use eyre::WrapErr;
+
 const BUF_SIZE: usize = 8192;
 
 #[allow(dead_code)]
@@ -140,15 +142,17 @@ fn run_child_session(
     args: &[String],
     config: &Config,
 ) -> eyre::Result<(i32, Arc<Mutex<Option<String>>>)> {
-    let (pty, pts) = pty_process::blocking::open()?;
+    let (pty, pts) =
+        pty_process::blocking::open().wrap_err("opening PTY")?;
 
     let size = terminal::terminal_size(&io::stdout())
         .unwrap_or_else(|_| pty_process::Size::new(24, 80));
-    pty.resize(size)?;
+    pty.resize(size).wrap_err("resizing PTY")?;
 
     let mut child = pty_process::blocking::Command::new(program)
         .args(args)
-        .spawn(pts)?;
+        .spawn(pts)
+        .wrap_err_with(|| format!("spawning child command: {program}"))?;
 
     let child_alive = Arc::new(AtomicBool::new(true));
     let title_state: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -161,16 +165,20 @@ fn run_child_session(
 
     let child_pid = child.id();
 
-    let forward_sigs = signals::parse_forward_signals(&config.forward_signals)?;
+    let forward_sigs =
+        signals::parse_forward_signals(&config.forward_signals).wrap_err("parsing forward_signals")?;
     let sig_nums: Vec<i32> = forward_sigs.iter().map(|s| *s as i32).collect();
     let mut sig_handle = if !sig_nums.is_empty() {
-        Some(signal_hook::iterator::Signals::new(&sig_nums)?)
+        Some(
+            signal_hook::iterator::Signals::new(&sig_nums)
+                .wrap_err("registering signal handlers")?,
+        )
     } else {
         None
     };
 
-    let winch_handle =
-        signal_hook::iterator::Signals::new([signal_hook::consts::SIGWINCH])?;
+    let winch_handle = signal_hook::iterator::Signals::new([signal_hook::consts::SIGWINCH])
+        .wrap_err("registering SIGWINCH handler")?;
 
     let alive_for_signal = child_alive.clone();
     let signal_thread = if let Some(sigs) = sig_handle.take() {
