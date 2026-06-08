@@ -4,9 +4,12 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use crate::config::Config;
 use crate::osc::TitleObserver;
+use crate::signals;
 use crate::terminal;
 
 const BUF_SIZE: usize = 8192;
@@ -140,8 +143,66 @@ pub fn run(config: Config) -> eyre::Result<(i32, Arc<Mutex<Option<String>>>)> {
 
     let pty_write_fd = unsafe { dup_fd(pty.as_raw_fd())? };
     let pty_read_fd = unsafe { dup_fd(pty.as_raw_fd())? };
-
+    let pty_resize_fd = unsafe { dup_fd(pty.as_raw_fd())? };
     drop(pty);
+
+    let child_pid = child.id();
+
+    let forward_sigs = signals::parse_forward_signals(&config.forward_signals)?;
+    let sig_nums: Vec<i32> = forward_sigs.iter().map(|s| *s as i32).collect();
+    let mut sig_handle = if !sig_nums.is_empty() {
+        Some(signal_hook::iterator::Signals::new(&sig_nums)?)
+    } else {
+        None
+    };
+
+    let winch_handle =
+        signal_hook::iterator::Signals::new([signal_hook::consts::SIGWINCH])?;
+
+    let alive_for_signal = child_alive.clone();
+    let signal_thread = if let Some(sigs) = sig_handle.take() {
+        std::thread::spawn(move || {
+            let mut sigs = sigs;
+            loop {
+                if !alive_for_signal.load(Ordering::Relaxed) {
+                    break;
+                }
+                for sig in sigs.pending() {
+                    if !alive_for_signal.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let nix_sig = match nix::sys::signal::Signal::try_from(sig) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    let _ = signals::forward_to_process_group(child_pid, nix_sig);
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        })
+    } else {
+        std::thread::spawn(|| {})
+    };
+
+    let alive_for_resize = child_alive.clone();
+    let resize_thread = std::thread::spawn(move || {
+        let pty_file = unsafe { std::fs::File::from_raw_fd(pty_resize_fd) };
+        let mut winch = winch_handle;
+        loop {
+            if !alive_for_resize.load(Ordering::Relaxed) {
+                break;
+            }
+            for _sig in winch.pending() {
+                if !alive_for_resize.load(Ordering::Relaxed) {
+                    break;
+                }
+                if let Ok(ws) = terminal::query_winsize(&io::stdout()) {
+                    let _ = terminal::set_pty_size(pty_file.as_raw_fd(), &ws);
+                }
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
 
     let alive_for_stdin = child_alive.clone();
     let stdin_thread = std::thread::spawn(move || {
@@ -158,6 +219,9 @@ pub fn run(config: Config) -> eyre::Result<(i32, Arc<Mutex<Option<String>>>)> {
 
     let exit_status = child.wait()?;
     child_alive.store(false, Ordering::Relaxed);
+
+    let _ = signal_thread.join();
+    let _ = resize_thread.join();
 
     match stdout_thread.join() {
         Ok(Ok(_)) => {}

@@ -36,14 +36,28 @@ impl Drop for RawTerminalGuard {
 }
 
 pub fn terminal_size<F: AsFd>(stdout: &F) -> eyre::Result<Size> {
-    let fd = stdout.as_fd().as_raw_fd();
+    let ws = query_winsize(stdout)?;
+    Ok(Size::new(ws.ws_row, ws.ws_col))
+}
+
+pub fn query_winsize<F: AsFd>(fd: &F) -> eyre::Result<nix::libc::winsize> {
+    let raw_fd = fd.as_fd().as_raw_fd();
     let ws: nix::libc::winsize = unsafe {
         let mut ws = std::mem::zeroed();
-        let ret = nix::libc::ioctl(fd, nix::libc::TIOCGWINSZ as _, &mut ws);
+        let ret = nix::libc::ioctl(raw_fd, nix::libc::TIOCGWINSZ as _, &mut ws);
         if ret == -1 {
             return Err(eyre::eyre!("TIOCGWINSZ ioctl failed"));
         }
         ws
     };
-    Ok(Size::new(ws.ws_row, ws.ws_col))
+    Ok(ws)
+}
+
+pub fn set_pty_size(fd: std::os::fd::RawFd, ws: &nix::libc::winsize) -> eyre::Result<()> {
+    let ret = unsafe { nix::libc::ioctl(fd, nix::libc::TIOCSWINSZ as _, ws) };
+    if ret == -1 {
+        Err(eyre::eyre!("TIOCSWINSZ ioctl failed"))
+    } else {
+        Ok(())
+    }
 }
