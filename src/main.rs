@@ -3,6 +3,7 @@
 mod config;
 mod osc;
 mod proxy;
+mod signals;
 mod terminal;
 
 use clap::Parser;
