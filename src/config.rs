@@ -41,7 +41,7 @@ fn default_forward_signals() -> Vec<String> {
 }
 
 fn default_reemit_title() -> bool {
-    true
+    false
 }
 
 impl Default for Config {

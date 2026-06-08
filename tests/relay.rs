@@ -43,3 +43,47 @@ fn osc_title_passthrough() {
         "expected stdout to contain 'visible', got: {stdout:?}"
     );
 }
+
+#[test]
+fn no_title_reemit_by_default() {
+    let output = bin()
+        .unwrap()
+        .args([
+            "--",
+            "sh",
+            "-c",
+            "printf '\\033]2;captured\\007done'",
+        ])
+        .write_stdin("q")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let first = stdout.match_indices("\x1b]2;captured\x07").count();
+    assert_eq!(
+        first, 1,
+        "expected exactly one OSC title sequence, got {first}: {stdout:?}"
+    );
+}
+
+#[test]
+fn reemit_title_when_enabled() {
+    let output = bin()
+        .unwrap()
+        .args([
+            "--reemit-title",
+            "true",
+            "--",
+            "sh",
+            "-c",
+            "printf '\\033]2;captured\\007done'",
+        ])
+        .write_stdin("q")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let count = stdout.match_indices("\x1b]2;captured\x07").count();
+    assert!(
+        count >= 2,
+        "expected at least two OSC title sequences (original + re-emit), got {count}: {stdout:?}"
+    );
+}
