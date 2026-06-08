@@ -10,6 +10,7 @@ fn pty_relay_passthrough() {
     let output = bin()
         .unwrap()
         .args(["--", "sh", "-c", "printf hello"])
+        .write_stdin("q")
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -29,6 +30,7 @@ fn osc_title_passthrough() {
             "-c",
             "printf '\\033]2;my-title\\007visible'",
         ])
+        .write_stdin("q")
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);

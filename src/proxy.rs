@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::osc::TitleObserver;
+use crate::prompt;
 use crate::signals;
 use crate::terminal;
 
@@ -117,14 +118,28 @@ unsafe fn dup_fd(fd: std::os::fd::RawFd) -> eyre::Result<std::os::fd::RawFd> {
     }
 }
 
-pub fn run(config: Config) -> eyre::Result<(i32, Arc<Mutex<Option<String>>>)> {
-    if config.command.is_empty() {
-        eyre::bail!("no command specified");
+fn exit_code_from_status(exit_status: std::process::ExitStatus) -> i32 {
+    match exit_status.code() {
+        Some(code) => code,
+        None => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                128 + exit_status.signal().unwrap_or(0)
+            }
+            #[cfg(not(unix))]
+            {
+                1
+            }
+        }
     }
+}
 
-    let program = &config.command[0];
-    let args = &config.command[1..];
-
+fn run_child_session(
+    program: &str,
+    args: &[String],
+    config: &Config,
+) -> eyre::Result<(i32, Arc<Mutex<Option<String>>>)> {
     let (pty, pts) = pty_process::blocking::open()?;
 
     let size = terminal::terminal_size(&io::stdout())
@@ -134,8 +149,6 @@ pub fn run(config: Config) -> eyre::Result<(i32, Arc<Mutex<Option<String>>>)> {
     let mut child = pty_process::blocking::Command::new(program)
         .args(args)
         .spawn(pts)?;
-
-    let _guard = terminal::RawTerminalGuard::enable(&io::stdin())?;
 
     let child_alive = Arc::new(AtomicBool::new(true));
     let title_state: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -225,7 +238,8 @@ pub fn run(config: Config) -> eyre::Result<(i32, Arc<Mutex<Option<String>>>)> {
 
     match stdout_thread.join() {
         Ok(Ok(_)) => {}
-        Ok(Err(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {}
+        Ok(Err(ref e)) if e.kind() == io::ErrorKind::UnexpectedEof => {}
+        Ok(Err(ref e)) if e.raw_os_error() == Some(5) => {}
         Ok(Err(e)) => return Err(e.into()),
         Err(_) => return Err(eyre::eyre!("PTY→stdout thread panicked")),
     }
@@ -236,17 +250,51 @@ pub fn run(config: Config) -> eyre::Result<(i32, Arc<Mutex<Option<String>>>)> {
         Err(_) => {}
     }
 
-    match exit_status.code() {
-        Some(code) => Ok((code, title_state)),
-        None => {
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::ExitStatusExt;
-                Ok((128 + exit_status.signal().unwrap_or(0), title_state))
+    Ok((exit_code_from_status(exit_status), title_state))
+}
+
+pub fn run(config: Config) -> eyre::Result<i32> {
+    if config.command.is_empty() {
+        eyre::bail!("no command specified");
+    }
+
+    let _guard = terminal::RawTerminalGuard::enable(&io::stdin())?;
+
+    let program = config.command[0].clone();
+    let args: Vec<String> = config.command[1..].to_vec();
+
+    loop {
+        let (exit_code, title_state) =
+            run_child_session(&program, &args, &config)?;
+
+        if config.reemit_title {
+            if let Ok(guard) = title_state.lock() {
+                if let Some(ref title) = *guard {
+                    let seq = prompt::title_reemit_sequence(title);
+                    let _ = io::stdout().write_all(&seq);
+                    let _ = io::stdout().flush();
+                }
             }
-            #[cfg(not(unix))]
-            {
-                Ok((1, title_state))
+        }
+
+        let prompt_text = prompt::format_status_prompt(exit_code);
+        let _ = io::stdout().write_all(prompt_text.as_bytes());
+        let _ = io::stdout().flush();
+
+        loop {
+            let mut buf = [0u8; 1];
+            let stdin_borrowed =
+                unsafe { std::os::fd::BorrowedFd::borrow_raw(io::stdin().as_raw_fd()) };
+            match nix::unistd::read(stdin_borrowed, &mut buf) {
+                Ok(0) => return Ok(exit_code),
+                Ok(_) => {}
+                Err(_) => return Ok(exit_code),
+            }
+            match buf[0] {
+                b' ' => break,
+                b'q' => return Ok(0),
+                0x03 => return Ok(130),
+                _ => continue,
             }
         }
     }
