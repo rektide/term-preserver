@@ -1,4 +1,4 @@
-// Imperative shell: terminal raw-mode management and size queries.
+// pattern: Imperative Shell
 
 use std::os::fd::{AsFd, AsRawFd};
 
@@ -24,6 +24,10 @@ impl RawTerminalGuard {
         };
         Ok(Self { original, fd })
     }
+
+    pub fn saved_original(&self) -> Option<(std::os::fd::RawFd, Termios)> {
+        self.original.clone().map(|original| (self.fd, original))
+    }
 }
 
 impl Drop for RawTerminalGuard {
@@ -33,6 +37,11 @@ impl Drop for RawTerminalGuard {
             let _ = tcsetattr(borrowed, SetArg::TCSANOW, original);
         }
     }
+}
+
+pub fn restore_termios(fd: std::os::fd::RawFd, original: &Termios) {
+    let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+    let _ = tcsetattr(borrowed, SetArg::TCSANOW, original);
 }
 
 pub fn terminal_size<F: AsFd>(stdout: &F) -> eyre::Result<Size> {
