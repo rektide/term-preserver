@@ -1,3 +1,4 @@
+// pattern: Mixed (needs refactoring)
 // Functional core: configuration defaults and types.
 // Imperative shell: load_config merges external sources.
 
@@ -20,6 +21,9 @@ pub struct Config {
     #[serde(default = "default_forward_signals")]
     pub forward_signals: Vec<String>,
 
+    #[serde(default = "default_shutdown_signals")]
+    pub shutdown_signals: Vec<String>,
+
     #[serde(default = "default_reemit_title")]
     pub reemit_title: bool,
 }
@@ -31,13 +35,20 @@ fn default_command() -> Vec<String> {
 
 fn default_config_path() -> String {
     let base = env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
-        format!("{}/.config", env::var("HOME").unwrap_or_else(|_| "/etc".to_string()))
+        format!(
+            "{}/.config",
+            env::var("HOME").unwrap_or_else(|_| "/etc".to_string())
+        )
     });
     format!("{base}/title-proxy/config.toml")
 }
 
 fn default_forward_signals() -> Vec<String> {
     vec!["SIGTERM".to_string(), "SIGHUP".to_string()]
+}
+
+fn default_shutdown_signals() -> Vec<String> {
+    Vec::new()
 }
 
 fn default_reemit_title() -> bool {
@@ -50,19 +61,29 @@ impl Default for Config {
             command: default_command(),
             config: default_config_path(),
             forward_signals: default_forward_signals(),
+            shutdown_signals: default_shutdown_signals(),
             reemit_title: default_reemit_title(),
         }
     }
 }
 
 #[derive(Parser)]
-#[command(name = "title-proxy", about = "PTY proxy that observes terminal title sequences")]
+#[command(
+    name = "title-proxy",
+    about = "PTY proxy that observes terminal title sequences"
+)]
 pub struct CliArgs {
     #[arg(long, help = "Path to config file")]
     pub config: Option<String>,
 
     #[arg(long, help = "Signals to forward to child")]
     pub forward_signals: Option<Vec<String>>,
+
+    #[arg(
+        long,
+        help = "Signals that request proxy shutdown after forwarding to an active child"
+    )]
+    pub shutdown_signals: Option<Vec<String>>,
 
     #[arg(long, help = "Re-emit captured title on child exit")]
     pub reemit_title: Option<bool>,
@@ -78,6 +99,8 @@ struct CliOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     forward_signals: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    shutdown_signals: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     reemit_title: Option<bool>,
 }
 
@@ -90,16 +113,14 @@ impl From<CliArgs> for CliOverlay {
                 Some(args.command)
             },
             forward_signals: args.forward_signals,
+            shutdown_signals: args.shutdown_signals,
             reemit_title: args.reemit_title,
         }
     }
 }
 
 pub fn load_config(cli_args: CliArgs) -> eyre::Result<Config> {
-    let config_path = cli_args
-        .config
-        .clone()
-        .unwrap_or_else(default_config_path);
+    let config_path = cli_args.config.clone().unwrap_or_else(default_config_path);
 
     let overlay = CliOverlay::from(cli_args);
 
@@ -119,8 +140,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     fn make_cli(args: &[&str]) -> CliArgs {
-        CliArgs::try_parse_from(std::iter::once("title-proxy").chain(args.iter().copied()))
-            .unwrap()
+        CliArgs::try_parse_from(std::iter::once("title-proxy").chain(args.iter().copied())).unwrap()
     }
 
     #[test]
@@ -145,6 +165,11 @@ mod tests {
     fn default_forwarded_signals_are_sigterm_and_sighup() {
         let sigs = default_forward_signals();
         assert_eq!(sigs, vec!["SIGTERM", "SIGHUP"]);
+    }
+
+    #[test]
+    fn default_shutdown_signals_empty_preserves_forward_only() {
+        assert!(default_shutdown_signals().is_empty());
     }
 
     #[test]
