@@ -24,12 +24,7 @@ fn pty_relay_passthrough() {
 fn osc_title_passthrough() {
     let output = bin()
         .unwrap()
-        .args([
-            "--",
-            "sh",
-            "-c",
-            "printf '\\033]2;my-title\\007visible'",
-        ])
+        .args(["--", "sh", "-c", "printf '\\033]2;my-title\\007visible'"])
         .write_stdin("q")
         .output()
         .unwrap();
@@ -48,12 +43,7 @@ fn osc_title_passthrough() {
 fn no_title_reemit_by_default() {
     let output = bin()
         .unwrap()
-        .args([
-            "--",
-            "sh",
-            "-c",
-            "printf '\\033]2;captured\\007done'",
-        ])
+        .args(["--", "sh", "-c", "printf '\\033]2;captured\\007done'"])
         .write_stdin("q")
         .output()
         .unwrap();

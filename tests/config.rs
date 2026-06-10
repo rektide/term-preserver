@@ -37,5 +37,6 @@ fn help_documents_options() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("--config"));
     assert!(stdout.contains("--forward-signals"));
+    assert!(stdout.contains("--shutdown-signals"));
     assert!(stdout.contains("--reemit-title"));
 }
