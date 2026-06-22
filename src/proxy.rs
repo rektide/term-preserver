@@ -116,7 +116,9 @@ fn read_prompt_input(runtime: &mut ProxyRuntime) -> eyre::Result<PromptInput> {
 pub fn run(config: Config) -> eyre::Result<i32> {
     let command = if config.launch.is_active() {
         let env_shell = std::env::var("SHELL").ok();
-        config.launch.resolve(&config.command, env_shell.as_deref())?
+        config
+            .launch
+            .resolve(&config.command, env_shell.as_deref())?
     } else {
         CommandSpec::try_from(config.command.clone())?
     };

@@ -213,7 +213,11 @@ pub fn load_config(cli_args: CliArgs) -> eyre::Result<Config> {
 
     let config: Config = Figment::from(Serialized::defaults(Config::default()))
         .merge(Toml::file(&config_path))
-        .merge(Env::prefixed("TITLE_PRESERVER_").split("__").ignore_empty(true))
+        .merge(
+            Env::prefixed("TITLE_PRESERVER_")
+                .split("__")
+                .ignore_empty(true),
+        )
         .merge(Serialized::defaults(overlay))
         .extract()?;
 
@@ -227,7 +231,8 @@ mod tests {
     use tempfile::NamedTempFile;
 
     fn make_cli(args: &[&str]) -> CliArgs {
-        CliArgs::try_parse_from(std::iter::once("title-preserver").chain(args.iter().copied())).unwrap()
+        CliArgs::try_parse_from(std::iter::once("title-preserver").chain(args.iter().copied()))
+            .unwrap()
     }
 
     #[test]
