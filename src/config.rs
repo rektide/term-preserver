@@ -10,6 +10,8 @@ use figment2::providers::{Env, Format, Serialized, Toml};
 use figment2::Figment;
 use serde::{Deserialize, Serialize};
 
+use crate::launch::LaunchConfig;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
 pub struct Config {
     #[serde(default = "default_command")]
@@ -26,6 +28,9 @@ pub struct Config {
 
     #[serde(default = "default_reemit_title")]
     pub reemit_title: bool,
+
+    #[serde(default)]
+    pub launch: LaunchConfig,
 }
 
 fn default_command() -> Vec<String> {
@@ -63,6 +68,7 @@ impl Default for Config {
             forward_signals: default_forward_signals(),
             shutdown_signals: default_shutdown_signals(),
             reemit_title: default_reemit_title(),
+            launch: LaunchConfig::default(),
         }
     }
 }
@@ -88,6 +94,33 @@ pub struct CliArgs {
     #[arg(long, help = "Re-emit captured title on child exit")]
     pub reemit_title: Option<bool>,
 
+    #[arg(long, help = "Shell to run")]
+    pub shell: Option<String>,
+
+    #[arg(long, help = "Connect via SSH")]
+    pub ssh: Option<String>,
+
+    #[arg(long, help = "Connect via mosh")]
+    pub mosh: Option<String>,
+
+    #[arg(long, help = "Create or attach to tmux session")]
+    pub tmux: Option<String>,
+
+    #[arg(long, help = "Create tmux session")]
+    pub tmux_create: Option<String>,
+
+    #[arg(long, help = "Attach to existing tmux session")]
+    pub tmux_attach: Option<String>,
+
+    #[arg(long, help = "Working directory for innermost layer")]
+    pub dir: Option<String>,
+
+    #[arg(long, help = "Skip login shell mode")]
+    pub no_login: bool,
+
+    #[arg(long, help = "Skip interactive shell mode")]
+    pub no_interactive: bool,
+
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub command: Vec<String>,
 }
@@ -102,10 +135,64 @@ struct CliOverlay {
     shutdown_signals: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reemit_title: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    launch: Option<LaunchOverlay>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LaunchOverlay {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shell: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ssh: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mosh: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tmux: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tmux_create: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tmux_attach: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    login: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interactive: Option<bool>,
+}
+
+impl LaunchOverlay {
+    fn is_set(&self) -> bool {
+        self.shell.is_some()
+            || self.ssh.is_some()
+            || self.mosh.is_some()
+            || self.tmux.is_some()
+            || self.tmux_create.is_some()
+            || self.tmux_attach.is_some()
+            || self.dir.is_some()
+            || self.login.is_some()
+            || self.interactive.is_some()
+    }
 }
 
 impl From<CliArgs> for CliOverlay {
     fn from(args: CliArgs) -> Self {
+        let launch_overlay = LaunchOverlay {
+            shell: args.shell,
+            ssh: args.ssh,
+            mosh: args.mosh,
+            tmux: args.tmux,
+            tmux_create: args.tmux_create,
+            tmux_attach: args.tmux_attach,
+            dir: args.dir,
+            login: if args.no_login { Some(false) } else { None },
+            interactive: if args.no_interactive {
+                Some(false)
+            } else {
+                None
+            },
+        };
+
         Self {
             command: if args.command.is_empty() {
                 None
@@ -115,6 +202,11 @@ impl From<CliArgs> for CliOverlay {
             forward_signals: args.forward_signals,
             shutdown_signals: args.shutdown_signals,
             reemit_title: args.reemit_title,
+            launch: if launch_overlay.is_set() {
+                Some(launch_overlay)
+            } else {
+                None
+            },
         }
     }
 }
@@ -218,5 +310,56 @@ command = ["/bin/from-file"]
         }
 
         assert_eq!(config.command, vec!["/bin/from-cli"]);
+    }
+
+    #[test]
+    fn cli_launch_shell_parses() {
+        let cli = make_cli(&["--config", "/dev/null", "--shell", "bash"]);
+        let config = load_config(cli).unwrap();
+        assert_eq!(config.launch.shell.as_deref(), Some("bash"));
+    }
+
+    #[test]
+    fn cli_launch_mosh_tmux_parses() {
+        let cli = make_cli(&[
+            "--config",
+            "/dev/null",
+            "--mosh",
+            "w",
+            "--tmux",
+            "compfuzor",
+        ]);
+        let config = load_config(cli).unwrap();
+        assert_eq!(config.launch.mosh.as_deref(), Some("w"));
+        assert_eq!(config.launch.tmux.as_deref(), Some("compfuzor"));
+    }
+
+    #[test]
+    fn cli_no_login_maps_to_false() {
+        let cli = make_cli(&["--config", "/dev/null", "--no-login"]);
+        let config = load_config(cli).unwrap();
+        assert!(!config.launch.login);
+    }
+
+    #[test]
+    fn cli_launch_defaults_login_interactive() {
+        let cli = make_cli(&["--config", "/dev/null"]);
+        let config = load_config(cli).unwrap();
+        assert!(config.launch.login);
+        assert!(config.launch.interactive);
+    }
+
+    #[test]
+    fn cli_launch_not_active_without_flags() {
+        let cli = make_cli(&["--config", "/dev/null"]);
+        let config = load_config(cli).unwrap();
+        assert!(!config.launch.is_active());
+    }
+
+    #[test]
+    fn cli_launch_active_with_ssh() {
+        let cli = make_cli(&["--config", "/dev/null", "--ssh", "w"]);
+        let config = load_config(cli).unwrap();
+        assert!(config.launch.is_active());
     }
 }

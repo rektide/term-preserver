@@ -35,7 +35,7 @@ impl TmuxMode {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LaunchConfig {
     #[serde(default)]
     pub shell: Option<String>,
@@ -55,6 +55,22 @@ pub struct LaunchConfig {
     pub login: bool,
     #[serde(default = "default_launch_interactive")]
     pub interactive: bool,
+}
+
+impl Default for LaunchConfig {
+    fn default() -> Self {
+        Self {
+            shell: None,
+            ssh: None,
+            mosh: None,
+            tmux: None,
+            tmux_create: None,
+            tmux_attach: None,
+            dir: None,
+            login: default_launch_login(),
+            interactive: default_launch_interactive(),
+        }
+    }
 }
 
 fn default_launch_login() -> bool {

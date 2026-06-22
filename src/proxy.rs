@@ -10,7 +10,6 @@ use crate::prompt::{self, PromptDecision, PromptPolicy};
 use crate::runtime::{ProxyEvent, ProxyRuntime};
 use crate::session::{ChildSession, CommandSpec, SessionExit};
 use crate::signals::SignalPolicy;
-
 enum PromptInput {
     Key(u8),
     Timeout,
@@ -115,7 +114,11 @@ fn read_prompt_input(runtime: &mut ProxyRuntime) -> eyre::Result<PromptInput> {
 }
 
 pub fn run(config: Config) -> eyre::Result<i32> {
-    let command = CommandSpec::try_from(config.command.clone())?;
+    let command = if config.launch.is_active() {
+        config.launch.resolve(&config.command)?
+    } else {
+        CommandSpec::try_from(config.command.clone())?
+    };
     let signal_policy = SignalPolicy::from_config(&config).wrap_err("parsing signal policy")?;
     let mut runtime = ProxyRuntime::enter(&signal_policy)?;
     let mut retry_loop = RetryLoop::new(command, config.reemit_title);
