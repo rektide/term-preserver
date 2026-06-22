@@ -1,4 +1,5 @@
 pub mod config;
+pub mod launch;
 pub mod osc;
 pub mod prompt;
 pub mod proxy;
