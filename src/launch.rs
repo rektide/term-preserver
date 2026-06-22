@@ -244,17 +244,28 @@ fn build_shell_invocation(
                 (Some(c), Some(d)) => Some(format!("cd {d} && exec {c}")),
             };
 
+            // The `(None, Some(dir))` arm re-execs the same shell with `{flags}`
+            // *inside* the -c string, so the outer shell carrying them too would
+            // source login/rc files twice. Suppress the outer flags there; every
+            // other arm needs them so the pre-exec environment is set up once.
+            let suppress_outer_flags = matches!((inner, dir), (None, Some(_)));
+            let outer_flags = if suppress_outer_flags {
+                String::new()
+            } else {
+                flags
+            };
+
             match c_arg {
                 Some(c_arg) => {
-                    if !flags.is_empty() {
-                        cmd.push(flags);
+                    if !outer_flags.is_empty() {
+                        cmd.push(outer_flags);
                     }
                     cmd.push("-c".into());
                     cmd.push(c_arg);
                 }
                 None => {
-                    if !flags.is_empty() {
-                        cmd.push(flags);
+                    if !outer_flags.is_empty() {
+                        cmd.push(outer_flags);
                     }
                 }
             }
@@ -265,7 +276,12 @@ fn build_shell_invocation(
 
 fn wrap_transport(cmd: Vec<String>, ssh: Option<&str>, mosh: Option<&str>) -> Vec<String> {
     if let Some(host) = ssh {
-        let mut wrapped = vec!["ssh".into(), host.into(), "--".into()];
+        // `-t` forces remote PTY allocation. We always hand ssh a command (the
+        // shell invocation), and ssh disables the remote tty whenever a command
+        // is given -- without this, an interactive remote shell is degraded and
+        // tmux fails outright with "open terminal failed: not a terminal".
+        // mosh always allocates a PTY, so its branch needs no equivalent.
+        let mut wrapped = vec!["ssh".into(), "-t".into(), host.into(), "--".into()];
         wrapped.extend(cmd);
         wrapped
     } else if let Some(host) = mosh {
@@ -535,10 +551,7 @@ mod tests {
             is_fallback: false,
         };
         let cmd = build_shell_invocation(&shell, None, Some("~/src/foo"), true, true);
-        assert_eq!(
-            cmd,
-            vec!["zsh", "-li", "-c", "cd ~/src/foo && exec zsh -li"]
-        );
+        assert_eq!(cmd, vec!["zsh", "-c", "cd ~/src/foo && exec zsh -li"]);
     }
 
     #[test]
@@ -645,7 +658,7 @@ mod tests {
     #[test]
     fn wrap_ssh() {
         let cmd = wrap_transport(vec!["zsh".into(), "-li".into()], Some("w"), None);
-        assert_eq!(cmd, vec!["ssh", "w", "--", "zsh", "-li"]);
+        assert_eq!(cmd, vec!["ssh", "-t", "w", "--", "zsh", "-li"]);
     }
 
     #[test]
@@ -763,7 +776,7 @@ mod tests {
         l.dir = Some("~/src/foo".into());
         let spec = l.resolve(&[], None).unwrap();
         assert_eq!(spec.program, "zsh");
-        assert_eq!(spec.args, vec!["-li", "-c", "cd ~/src/foo && exec zsh -li"]);
+        assert_eq!(spec.args, vec!["-c", "cd ~/src/foo && exec zsh -li"]);
     }
 
     #[test]
@@ -779,12 +792,25 @@ mod tests {
     }
 
     #[test]
+    fn resolve_ssh_tmux_forces_remote_pty() {
+        let mut l = launch_with_shell("zsh");
+        l.ssh = Some("w".into());
+        l.tmux = Some("dev".into());
+        let spec = l.resolve(&[], None).unwrap();
+        assert_eq!(spec.program, "ssh");
+        assert_eq!(
+            spec.args,
+            vec!["-t", "w", "--", "zsh", "-li", "-c", "exec tmux new -As dev"]
+        );
+    }
+
+    #[test]
     fn resolve_ssh_without_tmux() {
         let mut l = launch_with_shell("zsh");
         l.ssh = Some("w".into());
         let spec = l.resolve(&[], None).unwrap();
         assert_eq!(spec.program, "ssh");
-        assert_eq!(spec.args, vec!["w", "--", "zsh", "-li"]);
+        assert_eq!(spec.args, vec!["-t", "w", "--", "zsh", "-li"]);
     }
 
     #[test]
