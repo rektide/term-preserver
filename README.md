@@ -1,14 +1,17 @@
 # title-preserver
 
-> 🛟 Preserve a window title from reverting on detach.
+> 🛟 Keep a terminal window title from reverting when a session detaches.
 
-A longrunning terminal proxy that watches for and filters title changes,
-preventing the title reverting on detaching.
+`title-preserver` is a small, synchronous PTY proxy. It sits between your
+terminal and a child process, relaying every byte unchanged while watching the
+output stream for OSC title-setting sequences. On top of that foundation it
+adds a composable session launcher (shell / ssh / mosh / tmux), a retry prompt
+when the child exits, and precise signal handling.
 
-The foundation is a PTY proxy that transparently relays I/O between your
-terminal and a child process while observing OSC title-setting sequences. The
-title-preservation and detach features below are not yet implemented; see
-[TODO](#todo).
+> **Status.** The proxy, launcher, retry prompt, and signal handling all work
+> today. The *title-preservation* behavior the name promises — holding a title
+> across detach and tagging detached sessions — is still on the [roadmap](#roadmap).
+> Right now titles are observed and (optionally) re-emitted, not yet filtered.
 
 ## Install
 
@@ -19,123 +22,154 @@ Or build and run from source:
     cargo build --release
     ./target/release/title-preserver --help
 
-## Usage
-
-### Basic
+## Quick start
 
 Run your default shell through the proxy:
 
     title-preserver
 
-Run a specific command:
+Run a specific command (everything after `--` is the child, verbatim):
 
-    title-preserver -- ssh user@host
     title-preserver -- bash -l
+    title-preserver -- ssh user@host
 
-### Session launching
+Reconnect to a remote tmux session over mosh — the headline use case:
 
-Composable flags build remote/tmux/shell commands without manual quoting:
-
-    # Connect via mosh and attach (or create) a tmux session
     title-preserver --mosh w --tmux compfuzor
 
-    # SSH with nushell and a specific tmux session
-    title-preserver --ssh w --shell nu --tmux dev
+When that mosh link drops and the child exits, press space at the prompt to
+re-run the *same* resolved command: mosh redials and tmux re-attaches.
 
-    # Local tmux in a specific directory
-    title-preserver --tmux dev --dir ~/src/foo
+## Session launcher
 
-    # Trailing command runs inside tmux
-    title-preserver --mosh w --tmux dev -- vim
+The launch flags compose a single command **inside-out**, so you don't hand-write
+the nested `ssh … -- shell -c 'tmux …'` invocation yourself:
 
-Flags build the command inside-out: shell (innermost), optional tmux, optional
-ssh/mosh transport. Shell detection uses `--shell`, then `$SHELL`, then a
-runtime fallback that prefers zsh. Default mode is login + interactive for
-full environment setup.
+```
+shell        (innermost)   →  which shell binary, and how it's invoked
+  tmux       (optional)    →  wrap the shell's job in a tmux session
+    transport (optional)   →  ssh/mosh wraps the whole thing
+```
 
 | Flag | Description |
 |------|-------------|
-| `--shell <name>` | Shell override (accepts path or basename) |
+| `--shell <name>` | Shell override (path or basename) |
 | `--ssh <host>` | SSH transport (mutually exclusive with `--mosh`) |
 | `--mosh <host>` | mosh transport (mutually exclusive with `--ssh`) |
-| `--tmux <session>` | Create or attach (`tmux new -As`) |
+| `--tmux <session>` | Create *or* attach (`tmux new -As`) |
 | `--tmux-create <session>` | Create only (`tmux new -s`) |
-| `--tmux-attach <session>` | Attach only (`tmux a -t`) |
-| `--dir <path>` | Working directory for innermost layer |
-| `--no-login` | Skip login shell mode |
-| `--no-interactive` | Skip interactive shell mode |
+| `--tmux-attach <session>` | Attach only (`tmux attach-session -t`) |
+| `--dir <path>` | Working directory for the innermost layer |
+| `--no-login` | Drop login-shell mode (default: login) |
+| `--no-interactive` | Drop interactive mode (default: interactive) |
 
-### Retry prompt
+The three `--tmux*` flags are mutually exclusive, as are `--ssh`/`--mosh`. A
+trailing `-- <command>` becomes the innermost job: it runs *inside* tmux when a
+tmux flag is present, otherwise directly under the shell.
 
-When the child process exits, the proxy preserves screen content and appends:
+If none of these flags are given, the launcher is inert and the legacy
+`-- <command>` path (or `$SHELL`) is used unchanged.
+
+### What each invocation resolves to
+
+| You run | Resolved command |
+|---------|------------------|
+| `title-preserver` | `zsh -li` |
+| `--shell bash` | `bash -li` |
+| `--tmux dev` | `zsh -li -c 'exec tmux new -As dev'` |
+| `--mosh w --tmux compfuzor` | `mosh w -- zsh -li -c 'exec tmux new -As compfuzor'` |
+| `--ssh w --tmux dev` | `ssh -t w -- zsh -li -c 'exec tmux new -As dev'` |
+| `--mosh w --shell nu --tmux dev` | `mosh w -- nu -c 'tmux new -As dev'` |
+| `--dir ~/src/foo` | `zsh -c 'cd ~/src/foo && exec zsh -li'` |
+| `--dir ~/src/foo -- make test` | `zsh -li -c 'cd ~/src/foo && exec make test'` |
+| `--ssh w` | `ssh -t w -- zsh -li` |
+
+(`zsh` above is whatever resolves from `--shell`, then `$SHELL`, then a runtime
+fallback that prefers zsh and finally `sh`.)
+
+Notes:
+
+- **`--ssh` always adds `-t`.** ssh suppresses remote PTY allocation whenever a
+  command is supplied, and the launcher always supplies one — without `-t` an
+  interactive remote shell is degraded and tmux fails with *"open terminal
+  failed: not a terminal."* mosh allocates a PTY itself.
+- **Shell families.** POSIX shells (bash/zsh/sh/dash) and fish are invoked with
+  `-l`/`-i` flags and `exec`. nushell uses `-c` only (no login flag, no `exec`
+  builtin); `--no-login`/`--no-interactive` are no-ops for it.
+- **Retry re-runs the whole stack.** The resolved command carries the full
+  transport + shell + tmux chain, so the [retry prompt](#retry-prompt)
+  reconnects and re-attaches with one keystroke.
+
+### What's shell-evaluated vs literal
+
+`--dir` is **evaluated by the shell** (`cd <path>`), so `~`, `$VAR`, and globs
+expand as you'd expect — but a path containing spaces currently needs manual
+escaping. Trailing command arguments and tmux session names are passed through
+with minimal quoting today; arguments containing spaces or shell metacharacters
+may not survive intact. Tightening this is tracked in the issue tracker
+(`tipre-526`, `tipre-ahg`).
+
+## Retry prompt
+
+When the child exits, the proxy keeps the screen contents and appends:
 
     [title-preserver] child exited with code {exit_code}; space=retry q=quit
 
 | Key | Action |
 |--------|---------------------------------------------------------|
-| space | respawn the same command |
-| q | restore terminal to cooked mode and exit 0 |
-| Ctrl+C | restore terminal and exit 130 |
+| space | respawn the same resolved command |
+| q | restore the terminal to cooked mode and exit 0 |
+| Ctrl+C | restore the terminal and exit 130 |
 
-The proxy stays in raw mode at the prompt so keystrokes are read immediately
+The proxy stays in raw mode at the prompt, so keystrokes register immediately
 without Enter.
 
-### Title re-emit
+## Title re-emit
 
 By default the proxy captures OSC title sequences in memory but does nothing
-with them after child exit. Enable `--reemit-title true` to re-emit the last
-captured title to the outer terminal when the child dies. This is useful when
-a child (like SSH) sets a title you want to preserve across reconnections.
+with them on child exit. Pass `--reemit-title true` to re-emit the last captured
+title to the outer terminal when the child dies — useful when a child (like SSH)
+set a title you want to keep across reconnections.
 
-### Signal handling
+## Signal handling
 
 The proxy separates process-level shutdown from child forwarding.
 
-**Forwarded signals** (`forward_signals`, default `SIGTERM`, `SIGHUP`):
-delivered to the child's process group via `killpg(child_pid, signal)`. This
-ensures grandchildren (e.g. a remote shell spawned by SSH) also receive the
-signal.
+**Forwarded signals** (`--forward-signals`, default `SIGTERM SIGHUP`) are
+delivered to the child's *process group* via `killpg(child_pid, signal)`, so
+grandchildren (e.g. a remote shell spawned by ssh) also receive them.
 
-**Shutdown signals** (`shutdown_signals`, default empty): forwarded to the
-child AND trigger proxy termination after cleanup. Add signals here if you
-want the proxy to die after forwarding:
+**Shutdown signals** (`--shutdown-signals`, default empty) are forwarded to the
+child *and* trigger proxy termination after cleanup. Add a signal here when you
+want the proxy to exit once it has forwarded:
 
     title-preserver --shutdown-signals SIGTERM -- ssh user@host
 
 With the default empty list, `SIGTERM` during an active child is forwarded
-without shutting down the proxy. At the retry prompt (no active child),
-`SIGTERM` and `SIGHUP` always trigger shutdown with terminal restoration.
+without shutting the proxy down. At the retry prompt (no active child),
+`SIGTERM`/`SIGHUP` always trigger shutdown with terminal restoration.
 
 **Other signals:**
 
-- `SIGWINCH` -- terminal resizes propagated to the child PTY via
-  `ioctl(TIOCSWINSZ)`.
-- `SIGINT`, `SIGQUIT`, `SIGTSTP` -- generated by the kernel's line discipline
-  inside the PTY automatically. No forwarding needed.
+- `SIGWINCH` — terminal resizes propagate to the child PTY via `ioctl(TIOCSWINSZ)`.
+- `SIGINT`, `SIGQUIT`, `SIGTSTP` — generated by the PTY's line discipline
+  inside the child automatically; no forwarding needed.
 
 ## Configuration
 
-Config is loaded via [figment2](https://docs.rs/figment2) with precedence:
-CLI args > environment variables > TOML file > defaults.
+Config loads via [figment2](https://docs.rs/figment2) with precedence:
+**CLI args > environment variables > TOML file > defaults**.
 
 ### CLI options
 
 | Option | Description | Default |
 |--------|-------------|---------|
 | `--config <path>` | Path to config file | `$XDG_CONFIG_HOME/title-preserver/config.toml` |
-| `--forward-signals <sig...>` | Signals to forward to child process group | `SIGTERM SIGHUP` |
-| `--shutdown-signals <sig...>` | Signals that trigger proxy shutdown after forwarding | _(empty)_ |
+| `--forward-signals <sig…>` | Signals forwarded to the child process group | `SIGTERM SIGHUP` |
+| `--shutdown-signals <sig…>` | Signals that also shut the proxy down | _(empty)_ |
 | `--reemit-title <bool>` | Re-emit captured OSC title on child exit | `false` |
-| `--shell <name>` | Shell to run | `$SHELL` |
-| `--ssh <host>` | Connect via SSH | _none_ |
-| `--mosh <host>` | Connect via mosh | _none_ |
-| `--tmux <session>` | Create or attach tmux session | _none_ |
-| `--tmux-create <session>` | Create tmux session | _none_ |
-| `--tmux-attach <session>` | Attach to existing tmux session | _none_ |
-| `--dir <path>` | Working directory | _none_ |
-| `--no-login` | Skip login shell mode | _off_ |
-| `--no-interactive` | Skip interactive shell mode | _off_ |
-| `-- <command...>` | Command to run (trailing args) | `$SHELL` |
+| `--shell` / `--ssh` / `--mosh` / `--tmux*` / `--dir` / `--no-login` / `--no-interactive` | [Session launcher](#session-launcher) | _none_ |
+| `-- <command…>` | Child command (trailing args) | `$SHELL` |
 
 ### Config file
 
@@ -149,7 +183,7 @@ reemit_title = false
 
 [launch]
 shell = "zsh"
-ssh = "w"
+mosh = "w"
 tmux = "compfuzor"
 dir = "~/src/foo"
 login = true
@@ -158,19 +192,20 @@ interactive = true
 
 ### Environment variables
 
-Prefix `TITLE_PRESERVER_`, use `__` for nesting. Values are JSON-encoded where
-applicable:
+Prefix `TITLE_PRESERVER_`, with `__` for nesting into `[launch]`. Values are
+JSON-encoded where applicable:
 
     TITLE_PRESERVER_COMMAND='["ssh", "user@host"]'
     TITLE_PRESERVER_REEMIT_TITLE=true
-    TITLE_PRESERVER_LAUNCH__SSH=w
+    TITLE_PRESERVER_LAUNCH__MOSH=w
     TITLE_PRESERVER_LAUNCH__TMUX=compfuzor
+    TITLE_PRESERVER_LAUNCH__LOGIN=false
 
 ## Architecture
 
-Synchronous throughout. No async runtime, no Tokio. Two blocking `std::thread`
-relay workers handle byte movement. The design prioritizes being small and
-easy to reason about.
+Synchronous throughout — no async runtime, no Tokio. Two blocking `std::thread`
+relay workers move bytes. The design prioritizes being small and easy to reason
+about.
 
 ### Data plane
 
@@ -203,18 +238,19 @@ RetryLoop
 
 Each resource with a distinct lifetime gets a small owner:
 
-- **`ProxyRuntime`** -- process-level: raw mode, signal coordination, shutdown
+- **`ProxyRuntime`** — process-level: raw mode, signal coordination, shutdown
   state, panic restoration.
-- **`ChildSession`** -- one PTY child attempt: open PTY, spawn child, dup fds,
-  start relays and forwarders, wait child, join relays, produce `SessionExit`.
-- **`RelayThreads`** -- owns the two blocking relay workers, classifies relay
+- **`ChildSession`** — one PTY child attempt: open PTY, spawn child, dup fds,
+  start relays and forwarders, wait, join relays, produce `SessionExit`.
+- **`RelayThreads`** — owns the two blocking relay workers and classifies relay
   completion (normal EOF, expected PTY close/EIO, stdin cancellation, panic).
-- **`SignalForwarder`** -- per-session child process-group forwarding.
-- **`ResizeForwarder`** -- per-session `SIGWINCH` propagation to child PTY.
-- **`PromptPolicy`** -- pure function mapping prompt keystrokes to retry/exit
+- **`SignalForwarder`** — per-session child process-group forwarding.
+- **`ResizeForwarder`** — per-session `SIGWINCH` propagation to the child PTY.
+- **`PromptPolicy`** — pure function mapping prompt keystrokes to retry/exit
   decisions. Testable without spawning the binary.
-- **`LaunchConfig`** -- pure pipeline that resolves composable launch flags
-  (--shell, --ssh, --mosh, --tmux, --dir) into a `CommandSpec`.
+- **`LaunchConfig`** — pure pipeline resolving the composable launch flags
+  (`--shell`, `--ssh`, `--mosh`, `--tmux`, `--dir`) into a `CommandSpec`. Reads
+  no I/O; `$SHELL` is injected by the caller.
 
 ### Module layout
 
@@ -235,22 +271,21 @@ src/
 
 ### OSC title parser
 
-A streaming state machine that processes bytes one at a time, maintaining
-state across read buffer boundaries:
+A streaming state machine that processes bytes one at a time, holding state
+across read-buffer boundaries:
 
 ```
 Ground → ESC → ] → OscParam → ; → OscData → BEL (0x07) or ESC \ → Ground
 ```
 
 OSC codes 0, 1, and 2 are recognized as title-setting sequences. Titles up to
-4096 bytes are captured; longer sequences are ignored to prevent unbounded
-growth.
+4096 bytes are captured; longer sequences are ignored to bound memory.
 
 ### Design documents
 
-- [`doc/design/2026-06-08-title-proxy.md`](doc/design/2026-06-08-title-proxy.md) -- original MVP design
-- [`doc/design/2026-06-08-child-session-orchestration.md`](doc/design/2026-06-08-child-session-orchestration.md) -- ownership refactor and event coordinator design
-- [`doc/design/2026-06-22-session-launcher.md`](doc/design/2026-06-22-session-launcher.md) -- composable session launching flags
+- [`doc/design/2026-06-08-title-proxy.md`](doc/design/2026-06-08-title-proxy.md) — original MVP design
+- [`doc/design/2026-06-08-child-session-orchestration.md`](doc/design/2026-06-08-child-session-orchestration.md) — ownership refactor and event coordinator
+- [`doc/design/2026-06-22-session-launcher.md`](doc/design/2026-06-22-session-launcher.md) — composable session launching flags
 
 ## Dependencies
 
@@ -261,13 +296,13 @@ growth.
 | `signal-hook` | Signal registration and iteration |
 | `figment2` | Layered configuration (CLI > env > file > defaults) |
 | `clap` | CLI argument parsing |
-| `bon` | Builder pattern on config struct |
+| `bon` | Builder pattern on the config struct |
 | `eyre` | Error handling |
 
-## TODO
+## Roadmap
 
-- preserver mode: a filter of title updates to reject/ignore
-- change title to append `[d]` when detached, reset on re-attach to original (not [d]) title
-- integrate with `zim-tgo` teleport.
-- better define attached state machine, transitions
+- **preserver mode**: filter title updates to reject/ignore reverts
+- tag the title with `[d]` when detached, reset to the original on re-attach
+- integrate with `zim-tgo` teleport
+- better-defined attached/detached state machine and transitions
 - dreaming: materialized arrow cache view of system state
