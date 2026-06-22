@@ -35,7 +35,7 @@ impl TmuxMode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchConfig {
     #[serde(default)]
     pub shell: Option<String>,
@@ -292,16 +292,12 @@ impl LaunchConfig {
         None
     }
 
+    /// A launch is "active" (and therefore worth resolving instead of taking the
+    /// raw `-- command` path) whenever any field differs from the defaults.
+    /// Comparing against `Default` stays correct as fields are added, rather than
+    /// an enumeration that silently drifts.
     pub fn is_active(&self) -> bool {
-        self.shell.is_some()
-            || self.ssh.is_some()
-            || self.mosh.is_some()
-            || self.tmux.is_some()
-            || self.tmux_create.is_some()
-            || self.tmux_attach.is_some()
-            || self.dir.is_some()
-            || !self.login
-            || !self.interactive
+        *self != Self::default()
     }
 
     fn validate(&self) -> eyre::Result<()> {

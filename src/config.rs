@@ -139,7 +139,7 @@ struct CliOverlay {
     launch: Option<LaunchOverlay>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 struct LaunchOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     shell: Option<String>,
@@ -162,16 +162,11 @@ struct LaunchOverlay {
 }
 
 impl LaunchOverlay {
+    /// Any field set to a non-default (non-`None`) value means the CLI carried a
+    /// launch flag worth merging. Comparing against `Default` keeps this honest
+    /// as fields are added, instead of an enumeration that silently drifts.
     fn is_set(&self) -> bool {
-        self.shell.is_some()
-            || self.ssh.is_some()
-            || self.mosh.is_some()
-            || self.tmux.is_some()
-            || self.tmux_create.is_some()
-            || self.tmux_attach.is_some()
-            || self.dir.is_some()
-            || self.login.is_some()
-            || self.interactive.is_some()
+        *self != Self::default()
     }
 }
 
