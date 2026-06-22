@@ -3,7 +3,7 @@ use std::thread;
 use std::time::Duration;
 
 fn bin() -> StdCommand {
-    StdCommand::new(env!("CARGO_BIN_EXE_title-proxy"))
+    StdCommand::new(env!("CARGO_BIN_EXE_title-preserver"))
 }
 
 #[test]

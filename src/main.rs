@@ -1,7 +1,7 @@
 // pattern: Imperative Shell
 
 use clap::Parser;
-use title_proxy::{config, proxy};
+use title_preserver::{config, proxy};
 
 fn main() -> eyre::Result<()> {
     let cli_args = config::CliArgs::parse();

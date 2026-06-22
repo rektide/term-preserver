@@ -2,7 +2,7 @@ use assert_cmd::cargo::CargoError;
 use assert_cmd::Command;
 
 fn bin() -> Result<assert_cmd::Command, CargoError> {
-    Command::cargo_bin("title-proxy")
+    Command::cargo_bin("title-preserver")
 }
 
 #[test]

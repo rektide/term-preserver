@@ -1,14 +1,14 @@
 # title-preserver
 
-> Preserve a window title from reverting on detach.
+> 🛟 Preserve a window title from reverting on detach.
 
 A longrunning terminal proxy that watches for and filters title changes,
 preventing the title reverting on detaching.
 
-The foundation is a PTY proxy (`title-proxy`) that transparently relays I/O
-between your terminal and a child process while observing OSC title-setting
-sequences. The title-preservation and detach features below are not yet
-implemented; see [TODO](#todo).
+The foundation is a PTY proxy that transparently relays I/O between your
+terminal and a child process while observing OSC title-setting sequences. The
+title-preservation and detach features below are not yet implemented; see
+[TODO](#todo).
 
 ## Install
 
@@ -17,7 +17,7 @@ implemented; see [TODO](#todo).
 Or build and run from source:
 
     cargo build --release
-    ./target/release/title-proxy --help
+    ./target/release/title-preserver --help
 
 ## Usage
 
@@ -25,18 +25,51 @@ Or build and run from source:
 
 Run your default shell through the proxy:
 
-    title-proxy
+    title-preserver
 
 Run a specific command:
 
-    title-proxy -- ssh user@host
-    title-proxy -- bash -l
+    title-preserver -- ssh user@host
+    title-preserver -- bash -l
+
+### Session launching
+
+Composable flags build remote/tmux/shell commands without manual quoting:
+
+    # Connect via mosh and attach (or create) a tmux session
+    title-preserver --mosh w --tmux compfuzor
+
+    # SSH with nushell and a specific tmux session
+    title-preserver --ssh w --shell nu --tmux dev
+
+    # Local tmux in a specific directory
+    title-preserver --tmux dev --dir ~/src/foo
+
+    # Trailing command runs inside tmux
+    title-preserver --mosh w --tmux dev -- vim
+
+Flags build the command inside-out: shell (innermost), optional tmux, optional
+ssh/mosh transport. Shell detection uses `--shell`, then `$SHELL`, then a
+runtime fallback that prefers zsh. Default mode is login + interactive for
+full environment setup.
+
+| Flag | Description |
+|------|-------------|
+| `--shell <name>` | Shell override (accepts path or basename) |
+| `--ssh <host>` | SSH transport (mutually exclusive with `--mosh`) |
+| `--mosh <host>` | mosh transport (mutually exclusive with `--ssh`) |
+| `--tmux <session>` | Create or attach (`tmux new -As`) |
+| `--tmux-create <session>` | Create only (`tmux new -s`) |
+| `--tmux-attach <session>` | Attach only (`tmux a -t`) |
+| `--dir <path>` | Working directory for innermost layer |
+| `--no-login` | Skip login shell mode |
+| `--no-interactive` | Skip interactive shell mode |
 
 ### Retry prompt
 
 When the child process exits, the proxy preserves screen content and appends:
 
-    [title-proxy] child exited with code {exit_code}; space=retry q=quit
+    [title-preserver] child exited with code {exit_code}; space=retry q=quit
 
 | Key | Action |
 |--------|---------------------------------------------------------|
@@ -67,7 +100,7 @@ signal.
 child AND trigger proxy termination after cleanup. Add signals here if you
 want the proxy to die after forwarding:
 
-    title-proxy --shutdown-signals SIGTERM -- ssh user@host
+    title-preserver --shutdown-signals SIGTERM -- ssh user@host
 
 With the default empty list, `SIGTERM` during an active child is forwarded
 without shutting down the proxy. At the retry prompt (no active child),
@@ -89,31 +122,49 @@ CLI args > environment variables > TOML file > defaults.
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--config <path>` | Path to config file | `$XDG_CONFIG_HOME/title-proxy/config.toml` |
+| `--config <path>` | Path to config file | `$XDG_CONFIG_HOME/title-preserver/config.toml` |
 | `--forward-signals <sig...>` | Signals to forward to child process group | `SIGTERM SIGHUP` |
 | `--shutdown-signals <sig...>` | Signals that trigger proxy shutdown after forwarding | _(empty)_ |
 | `--reemit-title <bool>` | Re-emit captured OSC title on child exit | `false` |
+| `--shell <name>` | Shell to run | `$SHELL` |
+| `--ssh <host>` | Connect via SSH | _none_ |
+| `--mosh <host>` | Connect via mosh | _none_ |
+| `--tmux <session>` | Create or attach tmux session | _none_ |
+| `--tmux-create <session>` | Create tmux session | _none_ |
+| `--tmux-attach <session>` | Attach to existing tmux session | _none_ |
+| `--dir <path>` | Working directory | _none_ |
+| `--no-login` | Skip login shell mode | _off_ |
+| `--no-interactive` | Skip interactive shell mode | _off_ |
 | `-- <command...>` | Command to run (trailing args) | `$SHELL` |
 
 ### Config file
 
-`~/.config/title-proxy/config.toml`:
+`~/.config/title-preserver/config.toml`:
 
 ```toml
 command = ["bash", "-l"]
 forward_signals = ["SIGTERM", "SIGHUP"]
 shutdown_signals = []
 reemit_title = false
+
+[launch]
+shell = "zsh"
+ssh = "w"
+tmux = "compfuzor"
+dir = "~/src/foo"
+login = true
+interactive = true
 ```
 
 ### Environment variables
 
-Prefix `TITLE_PROXY_`, use `__` for nesting. Values are JSON-encoded where
+Prefix `TITLE_PRESERVER_`, use `__` for nesting. Values are JSON-encoded where
 applicable:
 
-    TITLE_PROXY_COMMAND='["ssh", "user@host"]'
-    TITLE_PROXY_REEMIT_TITLE=true
-    TITLE_PROXY_FORWARD_SIGNALS='["SIGUSR1"]'
+    TITLE_PRESERVER_COMMAND='["ssh", "user@host"]'
+    TITLE_PRESERVER_REEMIT_TITLE=true
+    TITLE_PRESERVER_LAUNCH__SSH=w
+    TITLE_PRESERVER_LAUNCH__TMUX=compfuzor
 
 ## Architecture
 
@@ -162,6 +213,8 @@ Each resource with a distinct lifetime gets a small owner:
 - **`ResizeForwarder`** -- per-session `SIGWINCH` propagation to child PTY.
 - **`PromptPolicy`** -- pure function mapping prompt keystrokes to retry/exit
   decisions. Testable without spawning the binary.
+- **`LaunchConfig`** -- pure pipeline that resolves composable launch flags
+  (--shell, --ssh, --mosh, --tmux, --dir) into a `CommandSpec`.
 
 ### Module layout
 
@@ -170,6 +223,7 @@ src/
   main.rs        entry point: CLI parse, config load, delegate to library
   lib.rs         library boundary
   config.rs      figment2 config loading, Config/CliArgs types
+  launch.rs      LaunchConfig: shell detection, tmux/transport composition, resolution
   runtime.rs     ProxyRuntime, event channel, signal coordinator
   session.rs     ChildSession, RelayThreads, forwarders, CommandSpec, SessionExit
   proxy.rs       RetryLoop orchestrator
@@ -196,6 +250,7 @@ growth.
 
 - [`doc/design/2026-06-08-title-proxy.md`](doc/design/2026-06-08-title-proxy.md) -- original MVP design
 - [`doc/design/2026-06-08-child-session-orchestration.md`](doc/design/2026-06-08-child-session-orchestration.md) -- ownership refactor and event coordinator design
+- [`doc/design/2026-06-22-session-launcher.md`](doc/design/2026-06-22-session-launcher.md) -- composable session launching flags
 
 ## Dependencies
 
