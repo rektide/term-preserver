@@ -135,7 +135,7 @@ fn build_fallback_snippet(
     vec!["sh".into(), "-c".into(), snippet]
 }
 
-fn resolve_shell(launch: &LaunchConfig) -> ShellResolution {
+fn resolve_shell(launch: &LaunchConfig, env_shell: Option<&str>) -> ShellResolution {
     if let Some(ref shell) = launch.shell {
         return ShellResolution {
             name: shell.clone(),
@@ -144,12 +144,11 @@ fn resolve_shell(launch: &LaunchConfig) -> ShellResolution {
         };
     }
 
-    if let Ok(shell) = std::env::var("SHELL") {
+    if let Some(shell) = env_shell {
         if !shell.is_empty() {
-            let family = detect_shell_family(&shell);
             return ShellResolution {
-                name: shell,
-                family,
+                name: shell.to_string(),
+                family: detect_shell_family(shell),
                 is_fallback: false,
             };
         }
@@ -316,10 +315,17 @@ impl LaunchConfig {
         Ok(())
     }
 
-    pub fn resolve(&self, trailing: &[String]) -> eyre::Result<CommandSpec> {
+    /// `env_shell` is the caller's `$SHELL` (read in the imperative shell), used
+    /// only when neither `--shell` nor a config shell is set. Passing it in keeps
+    /// this resolution pipeline pure and deterministic in tests.
+    pub fn resolve(
+        &self,
+        trailing: &[String],
+        env_shell: Option<&str>,
+    ) -> eyre::Result<CommandSpec> {
         self.validate()?;
 
-        let shell = resolve_shell(self);
+        let shell = resolve_shell(self, env_shell);
         let inner = resolve_inner_command(self, trailing);
         let dir_for_shell = if self.tmux_mode().is_some() {
             None
@@ -707,7 +713,7 @@ mod tests {
     fn resolve_local_tmux() {
         let mut l = launch_with_shell("zsh");
         l.tmux = Some("dev".into());
-        let spec = l.resolve(&[]).unwrap();
+        let spec = l.resolve(&[], None).unwrap();
         assert_eq!(spec.program, "zsh");
         assert_eq!(spec.args, vec!["-li", "-c", "exec tmux new -As dev"]);
     }
@@ -717,7 +723,7 @@ mod tests {
         let mut l = launch_with_shell("zsh");
         l.mosh = Some("w".into());
         l.tmux = Some("compfuzor".into());
-        let spec = l.resolve(&[]).unwrap();
+        let spec = l.resolve(&[], None).unwrap();
         assert_eq!(spec.program, "mosh");
         assert_eq!(
             spec.args,
@@ -730,7 +736,7 @@ mod tests {
         let mut l = launch_with_shell("nu");
         l.mosh = Some("w".into());
         l.tmux = Some("compfuzor".into());
-        let spec = l.resolve(&[]).unwrap();
+        let spec = l.resolve(&[], None).unwrap();
         assert_eq!(spec.program, "mosh");
         assert_eq!(
             spec.args,
@@ -743,7 +749,7 @@ mod tests {
         let mut l = launch_with_shell("zsh");
         l.tmux = Some("dev".into());
         l.dir = Some("~/src/foo".into());
-        let spec = l.resolve(&["vim".into()]).unwrap();
+        let spec = l.resolve(&["vim".into()], None).unwrap();
         assert_eq!(spec.program, "zsh");
         assert_eq!(
             spec.args,
@@ -755,7 +761,7 @@ mod tests {
     fn resolve_dir_without_tmux() {
         let mut l = launch_with_shell("zsh");
         l.dir = Some("~/src/foo".into());
-        let spec = l.resolve(&[]).unwrap();
+        let spec = l.resolve(&[], None).unwrap();
         assert_eq!(spec.program, "zsh");
         assert_eq!(spec.args, vec!["-li", "-c", "cd ~/src/foo && exec zsh -li"]);
     }
@@ -764,7 +770,7 @@ mod tests {
     fn resolve_dir_with_trailing_no_tmux() {
         let mut l = launch_with_shell("zsh");
         l.dir = Some("~/src/foo".into());
-        let spec = l.resolve(&["make".into(), "test".into()]).unwrap();
+        let spec = l.resolve(&["make".into(), "test".into()], None).unwrap();
         assert_eq!(spec.program, "zsh");
         assert_eq!(
             spec.args,
@@ -776,7 +782,7 @@ mod tests {
     fn resolve_ssh_without_tmux() {
         let mut l = launch_with_shell("zsh");
         l.ssh = Some("w".into());
-        let spec = l.resolve(&[]).unwrap();
+        let spec = l.resolve(&[], None).unwrap();
         assert_eq!(spec.program, "ssh");
         assert_eq!(spec.args, vec!["w", "--", "zsh", "-li"]);
     }
@@ -784,7 +790,7 @@ mod tests {
     #[test]
     fn resolve_bare_shell_override() {
         let l = launch_with_shell("bash");
-        let spec = l.resolve(&[]).unwrap();
+        let spec = l.resolve(&[], None).unwrap();
         assert_eq!(spec.program, "bash");
         assert_eq!(spec.args, vec!["-li"]);
     }
@@ -794,7 +800,7 @@ mod tests {
         let mut l = launch_with_shell("zsh");
         l.login = false;
         l.interactive = false;
-        let spec = l.resolve(&[]).unwrap();
+        let spec = l.resolve(&[], None).unwrap();
         assert_eq!(spec.program, "zsh");
         assert!(spec.args.is_empty());
     }
@@ -804,7 +810,7 @@ mod tests {
         let mut l = launch_with_shell("zsh");
         l.ssh = Some("w".into());
         l.mosh = Some("w".into());
-        assert!(l.resolve(&[]).is_err());
+        assert!(l.resolve(&[], None).is_err());
     }
 
     #[test]
@@ -812,6 +818,6 @@ mod tests {
         let mut l = launch_with_shell("zsh");
         l.tmux = Some("dev".into());
         l.tmux_attach = Some("dev".into());
-        assert!(l.resolve(&[]).is_err());
+        assert!(l.resolve(&[], None).is_err());
     }
 }
