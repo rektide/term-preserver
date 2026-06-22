@@ -274,16 +274,43 @@ fn build_shell_invocation(
     }
 }
 
+/// Single-quote a token for a POSIX shell, leaving already-safe tokens bare.
+/// Embedded single quotes become the standard `'\''` escape.
+fn shell_quote(arg: &str) -> String {
+    let is_safe = !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:=@,+".contains(c));
+    if is_safe {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', "'\\''"))
+    }
+}
+
+/// Join an argv into one shell-quoted command line that survives being
+/// re-split by a remote shell (ssh concatenates and re-parses the command).
+fn shell_join(args: &[String]) -> String {
+    args.iter()
+        .map(|a| shell_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn wrap_transport(cmd: Vec<String>, ssh: Option<&str>, mosh: Option<&str>) -> Vec<String> {
     if let Some(host) = ssh {
-        // `-t` forces remote PTY allocation. We always hand ssh a command (the
-        // shell invocation), and ssh disables the remote tty whenever a command
-        // is given -- without this, an interactive remote shell is degraded and
-        // tmux fails outright with "open terminal failed: not a terminal".
-        // mosh always allocates a PTY, so its branch needs no equivalent.
-        let mut wrapped = vec!["ssh".into(), "-t".into(), host.into(), "--".into()];
-        wrapped.extend(cmd);
-        wrapped
+        // `-t` forces remote PTY allocation: ssh disables the remote tty whenever
+        // a command is given (we always give one), and without it an interactive
+        // remote shell is degraded and tmux fails with "open terminal failed".
+        //
+        // ssh concatenates the remote command argv into a single string and runs
+        // it through the remote login shell, so we hand it ONE shell-quoted line
+        // rather than separate tokens (which would lose argument grouping). ssh
+        // also has no `--` option terminator -- a `--` ends up in the remote
+        // command and breaks it -- so it is omitted here. mosh differs on both
+        // counts (it passes argv through and uses `--`), so its branch is left
+        // alone.
+        vec!["ssh".into(), "-t".into(), host.into(), shell_join(&cmd)]
     } else if let Some(host) = mosh {
         let mut wrapped = vec!["mosh".into(), host.into(), "--".into()];
         wrapped.extend(cmd);
@@ -658,7 +685,36 @@ mod tests {
     #[test]
     fn wrap_ssh() {
         let cmd = wrap_transport(vec!["zsh".into(), "-li".into()], Some("w"), None);
-        assert_eq!(cmd, vec!["ssh", "-t", "w", "--", "zsh", "-li"]);
+        assert_eq!(cmd, vec!["ssh", "-t", "w", "zsh -li"]);
+    }
+
+    #[test]
+    fn shell_quote_leaves_safe_tokens_bare() {
+        assert_eq!(shell_quote("zsh"), "zsh");
+        assert_eq!(shell_quote("-li"), "-li");
+        assert_eq!(shell_quote("/usr/bin/zsh"), "/usr/bin/zsh");
+        assert_eq!(shell_quote("user@host"), "user@host");
+    }
+
+    #[test]
+    fn shell_quote_wraps_spaces_and_specials() {
+        assert_eq!(
+            shell_quote("exec tmux new -As dev"),
+            "'exec tmux new -As dev'"
+        );
+        assert_eq!(shell_quote(""), "''");
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+    }
+
+    #[test]
+    fn shell_join_quotes_each_token() {
+        let joined = shell_join(&[
+            "zsh".into(),
+            "-li".into(),
+            "-c".into(),
+            "exec tmux new -As dev".into(),
+        ]);
+        assert_eq!(joined, "zsh -li -c 'exec tmux new -As dev'");
     }
 
     #[test]
@@ -800,7 +856,7 @@ mod tests {
         assert_eq!(spec.program, "ssh");
         assert_eq!(
             spec.args,
-            vec!["-t", "w", "--", "zsh", "-li", "-c", "exec tmux new -As dev"]
+            vec!["-t", "w", "zsh -li -c 'exec tmux new -As dev'"]
         );
     }
 
@@ -810,7 +866,7 @@ mod tests {
         l.ssh = Some("w".into());
         let spec = l.resolve(&[], None).unwrap();
         assert_eq!(spec.program, "ssh");
-        assert_eq!(spec.args, vec!["-t", "w", "--", "zsh", "-li"]);
+        assert_eq!(spec.args, vec!["-t", "w", "zsh -li"]);
     }
 
     #[test]

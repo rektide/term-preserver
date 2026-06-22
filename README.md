@@ -78,21 +78,24 @@ If none of these flags are given, the launcher is inert and the legacy
 | `--shell bash` | `bash -li` |
 | `--tmux dev` | `zsh -li -c 'exec tmux new -As dev'` |
 | `--mosh w --tmux compfuzor` | `mosh w -- zsh -li -c 'exec tmux new -As compfuzor'` |
-| `--ssh w --tmux dev` | `ssh -t w -- zsh -li -c 'exec tmux new -As dev'` |
+| `--ssh w --tmux dev` | `ssh -t w "zsh -li -c 'exec tmux new -As dev'"` |
 | `--mosh w --shell nu --tmux dev` | `mosh w -- nu -c 'tmux new -As dev'` |
 | `--dir ~/src/foo` | `zsh -c 'cd ~/src/foo && exec zsh -li'` |
 | `--dir ~/src/foo -- make test` | `zsh -li -c 'cd ~/src/foo && exec make test'` |
-| `--ssh w` | `ssh -t w -- zsh -li` |
+| `--ssh w` | `ssh -t w 'zsh -li'` |
 
 (`zsh` above is whatever resolves from `--shell`, then `$SHELL`, then a runtime
 fallback that prefers zsh and finally `sh`.)
 
 Notes:
 
-- **`--ssh` always adds `-t`.** ssh suppresses remote PTY allocation whenever a
-  command is supplied, and the launcher always supplies one — without `-t` an
-  interactive remote shell is degraded and tmux fails with *"open terminal
-  failed: not a terminal."* mosh allocates a PTY itself.
+- **ssh vs mosh transport differ.** `--ssh` adds `-t` (ssh suppresses remote PTY
+  allocation whenever a command is supplied, and the launcher always supplies
+  one — without `-t` the remote shell is degraded and tmux fails with *"open
+  terminal failed: not a terminal"*) and hands ssh a *single shell-quoted
+  command string*, because ssh concatenates and re-parses the remote command
+  through the login shell. `--mosh` passes the argv through with a `--`
+  separator and allocates its own PTY, so it needs neither.
 - **Shell families.** POSIX shells (bash/zsh/sh/dash) and fish are invoked with
   `-l`/`-i` flags and `exec`. nushell uses `-c` only (no login flag, no `exec`
   builtin); `--no-login`/`--no-interactive` are no-ops for it.
