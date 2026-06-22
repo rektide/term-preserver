@@ -451,8 +451,16 @@ All resolution logic is pure (no I/O). Tests in `launch.rs`:
 - Trailing args still work with and without launch flags
 - `--no-login` and `--no-interactive` flags parse correctly
 
-## Open questions
+## Resolved decisions
 
-1. Should `--shell` validate that the shell exists locally before using it? Or just pass through and let the remote/host error if missing?
-2. Should the fallback snippet prefer `$SHELL` on the remote over zsh? (e.g., source `$SHELL` env on the remote side). Currently we skip `$SHELL` when it's not set locally, but it might be set remotely.
-3. tmux `attach-session -c <dir>` requires tmux 3.0+. Should we warn or fall back to cd-wrapping for older tmux?
+1. **`--shell` validation**: pass through, let the remote/host error if missing. No local existence check.
+2. **Remote `$SHELL`**: the fallback snippet should try `$SHELL` on the remote before falling back to zsh. Updated snippet:
+   ```
+   sh -c 'if [ -n "$SHELL" ]; then exec "$SHELL" -li; elif command -v zsh >/dev/null 2>&1; then exec zsh -li; else exec sh -li; fi'
+   ```
+   With inner command:
+   ```
+   sh -c 'if [ -n "$SHELL" ]; then exec "$SHELL" -lic "exec <inner>"; elif command -v zsh >/dev/null 2>&1; then exec zsh -lic "exec <inner>"; else exec sh -lc "exec <inner>"; fi'
+   ```
+   This respects the remote `$SHELL` env var when set, falls back to zsh if available, then sh.
+3. **tmux 3.0+**: required for `attach-session -c <dir>`. tmux 3.0 was released in late 2019; this is a safe minimum.
