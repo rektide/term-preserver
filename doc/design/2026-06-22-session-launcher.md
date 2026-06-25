@@ -53,43 +53,43 @@ Layer 3 (transport): ssh/mosh wraps the shell invocation
 
 ```
 # Bare shell
-title-preserver
+term-preserver
 → [$SHELL]
 
 # Shell override
-title-preserver --shell bash
+term-preserver --shell bash
 → [bash]
 
 # Local tmux
-title-preserver --tmux dev
+term-preserver --tmux dev
 → [zsh, -lic, "exec tmux new -As dev"]
 
 # Remote tmux (the main use case)
-title-preserver --mosh w --tmux compfuzor
+term-preserver --mosh w --tmux compfuzor
 → [mosh, w, --, zsh, -lic, "exec tmux new -As compfuzor"]
 
 # Remote tmux with nushell
-title-preserver --mosh w --shell nu --tmux compfuzor
+term-preserver --mosh w --shell nu --tmux compfuzor
 → [mosh, w, --, nu, -c, "tmux new -As compfuzor"]
 
 # Tmux with working directory
-title-preserver --mosh w --tmux dev --dir ~/src/foo
+term-preserver --mosh w --tmux dev --dir ~/src/foo
 → [mosh, w, --, zsh, -lic, "exec tmux new -c ~/src/foo -As dev"]
 
 # Tmux with trailing command (vim inside tmux)
-title-preserver --mosh w --tmux dev -- vim
+term-preserver --mosh w --tmux dev -- vim
 → [mosh, w, --, zsh, -lic, "exec tmux new -As dev vim"]
 
 # Dir without tmux (interactive shell in directory)
-title-preserver --dir ~/src/foo
+term-preserver --dir ~/src/foo
 → [zsh, -lic, "cd ~/src/foo && exec zsh -li"]
 
 # Dir with trailing command, no tmux
-title-preserver --dir ~/src/foo -- make test
+term-preserver --dir ~/src/foo -- make test
 → [zsh, -lic, "cd ~/src/foo && exec make test"]
 
 # SSH without tmux (gets remote login shell)
-title-preserver --ssh w
+term-preserver --ssh w
 → [ssh, w]
 ```
 
@@ -362,9 +362,9 @@ interactive = true
 Figment2 env support with `__` nesting:
 
 ```
-TITLE_PRESERVER_LAUNCH__SSH=w
-TITLE_PRESERVER_LAUNCH__TMUX=compfuzor
-TITLE_PRESERVER_LAUNCH__LOGIN=false
+TERM_PRESERVER_LAUNCH__SSH=w
+TERM_PRESERVER_LAUNCH__TMUX=compfuzor
+TERM_PRESERVER_LAUNCH__LOGIN=false
 ```
 
 ## Module structure

@@ -4,7 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_title-preserver"))
+    Command::new(env!("CARGO_BIN_EXE_term-preserver"))
 }
 
 #[test]

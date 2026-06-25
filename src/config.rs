@@ -45,7 +45,7 @@ fn default_config_path() -> String {
             env::var("HOME").unwrap_or_else(|_| "/etc".to_string())
         )
     });
-    format!("{base}/title-preserver/config.toml")
+    format!("{base}/term-preserver/config.toml")
 }
 
 fn default_forward_signals() -> Vec<String> {
@@ -75,7 +75,7 @@ impl Default for Config {
 
 #[derive(Parser)]
 #[command(
-    name = "title-preserver",
+    name = "term-preserver",
     about = "PTY proxy that observes terminal title sequences"
 )]
 pub struct CliArgs {
@@ -214,7 +214,7 @@ pub fn load_config(cli_args: CliArgs) -> eyre::Result<Config> {
     let config: Config = Figment::from(Serialized::defaults(Config::default()))
         .merge(Toml::file(&config_path))
         .merge(
-            Env::prefixed("TITLE_PRESERVER_")
+            Env::prefixed("TERM_PRESERVER_")
                 .split("__")
                 .ignore_empty(true),
         )
@@ -231,7 +231,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     fn make_cli(args: &[&str]) -> CliArgs {
-        CliArgs::try_parse_from(std::iter::once("title-preserver").chain(args.iter().copied()))
+        CliArgs::try_parse_from(std::iter::once("term-preserver").chain(args.iter().copied()))
             .unwrap()
     }
 
@@ -281,15 +281,15 @@ command = ["/bin/from-file"]
         use std::io::Write;
         tmp.write_all(config_content.as_bytes()).unwrap();
 
-        let prev_command = env::var("TITLE_PRESERVER_COMMAND").ok();
-        env::set_var("TITLE_PRESERVER_COMMAND", r#"["/bin/from-env"]"#);
+        let prev_command = env::var("TERM_PRESERVER_COMMAND").ok();
+        env::set_var("TERM_PRESERVER_COMMAND", r#"["/bin/from-env"]"#);
 
         let cli = make_cli(&["--config", tmp.path().to_str().unwrap()]);
         let config = load_config(cli).unwrap();
 
         match prev_command {
-            Some(v) => env::set_var("TITLE_PRESERVER_COMMAND", v),
-            None => env::remove_var("TITLE_PRESERVER_COMMAND"),
+            Some(v) => env::set_var("TERM_PRESERVER_COMMAND", v),
+            None => env::remove_var("TERM_PRESERVER_COMMAND"),
         }
 
         assert_eq!(config.command, vec!["/bin/from-env"]);
@@ -298,15 +298,15 @@ command = ["/bin/from-file"]
     #[test]
     #[serial]
     fn cli_overrides_env() {
-        let prev = env::var("TITLE_PRESERVER_COMMAND").ok();
-        env::set_var("TITLE_PRESERVER_COMMAND", r#"["/bin/from-env"]"#);
+        let prev = env::var("TERM_PRESERVER_COMMAND").ok();
+        env::set_var("TERM_PRESERVER_COMMAND", r#"["/bin/from-env"]"#);
 
         let cli = make_cli(&["--config", "/dev/null", "/bin/from-cli"]);
         let config = load_config(cli).unwrap();
 
         match prev {
-            Some(v) => env::set_var("TITLE_PRESERVER_COMMAND", v),
-            None => env::remove_var("TITLE_PRESERVER_COMMAND"),
+            Some(v) => env::set_var("TERM_PRESERVER_COMMAND", v),
+            None => env::remove_var("TERM_PRESERVER_COMMAND"),
         }
 
         assert_eq!(config.command, vec!["/bin/from-cli"]);

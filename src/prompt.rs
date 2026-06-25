@@ -28,7 +28,7 @@ impl PromptPolicy {
 }
 
 pub fn format_status_prompt(exit_code: i32) -> String {
-    format!("\r\n[title-preserver] child exited with code {exit_code}; space=retry q=quit")
+    format!("\r\n[term-preserver] child exited with code {exit_code}; space=retry q=quit")
 }
 
 pub fn title_reemit_sequence(title: &str) -> Vec<u8> {

@@ -1,8 +1,8 @@
-# title-preserver
+# term-preserver
 
 > 🛟 Keep a terminal window title from reverting when a session detaches.
 
-`title-preserver` is a small, synchronous PTY proxy. It sits between your
+`term-preserver` is a small, synchronous PTY proxy. It sits between your
 terminal and a child process, relaying every byte unchanged while watching the
 output stream for OSC title-setting sequences. On top of that foundation it
 adds a composable session launcher (shell / ssh / mosh / tmux), a retry prompt
@@ -20,22 +20,22 @@ when the child exits, and precise signal handling.
 Or build and run from source:
 
     cargo build --release
-    ./target/release/title-preserver --help
+    ./target/release/term-preserver --help
 
 ## Quick start
 
 Run your default shell through the proxy:
 
-    title-preserver
+    term-preserver
 
 Run a specific command (everything after `--` is the child, verbatim):
 
-    title-preserver -- bash -l
-    title-preserver -- ssh user@host
+    term-preserver -- bash -l
+    term-preserver -- ssh user@host
 
 Reconnect to a remote tmux session over mosh — the headline use case:
 
-    title-preserver --mosh w --tmux compfuzor
+    term-preserver --mosh w --tmux compfuzor
 
 When that mosh link drops and the child exits, press space at the prompt to
 re-run the *same* resolved command: mosh redials and tmux re-attaches.
@@ -74,7 +74,7 @@ If none of these flags are given, the launcher is inert and the legacy
 
 | You run | Resolved command |
 |---------|------------------|
-| `title-preserver` | `zsh -li` |
+| `term-preserver` | `zsh -li` |
 | `--shell bash` | `bash -li` |
 | `--tmux dev` | `zsh -li -c 'exec tmux new -As dev'` |
 | `--mosh w --tmux compfuzor` | `mosh w -- zsh -li -c 'exec tmux new -As compfuzor'` |
@@ -116,7 +116,7 @@ may not survive intact. Tightening this is tracked in the issue tracker
 
 When the child exits, the proxy keeps the screen contents and appends:
 
-    [title-preserver] child exited with code {exit_code}; space=retry q=quit
+    [term-preserver] child exited with code {exit_code}; space=retry q=quit
 
 | Key | Action |
 |--------|---------------------------------------------------------|
@@ -146,7 +146,7 @@ grandchildren (e.g. a remote shell spawned by ssh) also receive them.
 child *and* trigger proxy termination after cleanup. Add a signal here when you
 want the proxy to exit once it has forwarded:
 
-    title-preserver --shutdown-signals SIGTERM -- ssh user@host
+    term-preserver --shutdown-signals SIGTERM -- ssh user@host
 
 With the default empty list, `SIGTERM` during an active child is forwarded
 without shutting the proxy down. At the retry prompt (no active child),
@@ -167,7 +167,7 @@ Config loads via [figment2](https://docs.rs/figment2) with precedence:
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--config <path>` | Path to config file | `$XDG_CONFIG_HOME/title-preserver/config.toml` |
+| `--config <path>` | Path to config file | `$XDG_CONFIG_HOME/term-preserver/config.toml` |
 | `--forward-signals <sig…>` | Signals forwarded to the child process group | `SIGTERM SIGHUP` |
 | `--shutdown-signals <sig…>` | Signals that also shut the proxy down | _(empty)_ |
 | `--reemit-title <bool>` | Re-emit captured OSC title on child exit | `false` |
@@ -176,7 +176,7 @@ Config loads via [figment2](https://docs.rs/figment2) with precedence:
 
 ### Config file
 
-`~/.config/title-preserver/config.toml`:
+`~/.config/term-preserver/config.toml`:
 
 ```toml
 command = ["bash", "-l"]
@@ -195,14 +195,14 @@ interactive = true
 
 ### Environment variables
 
-Prefix `TITLE_PRESERVER_`, with `__` for nesting into `[launch]`. Values are
+Prefix `TERM_PRESERVER_`, with `__` for nesting into `[launch]`. Values are
 JSON-encoded where applicable:
 
-    TITLE_PRESERVER_COMMAND='["ssh", "user@host"]'
-    TITLE_PRESERVER_REEMIT_TITLE=true
-    TITLE_PRESERVER_LAUNCH__MOSH=w
-    TITLE_PRESERVER_LAUNCH__TMUX=compfuzor
-    TITLE_PRESERVER_LAUNCH__LOGIN=false
+    TERM_PRESERVER_COMMAND='["ssh", "user@host"]'
+    TERM_PRESERVER_REEMIT_TITLE=true
+    TERM_PRESERVER_LAUNCH__MOSH=w
+    TERM_PRESERVER_LAUNCH__TMUX=compfuzor
+    TERM_PRESERVER_LAUNCH__LOGIN=false
 
 ## Architecture
 
