@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use crate::filter::TitleFilterRule;
 use crate::launch::LaunchConfig;
 
+/// Resolved configuration for the proxy, merged from defaults, TOML, env, and
+/// CLI (in increasing precedence) by figment2.
 #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
 pub struct Config {
     #[serde(default = "default_command")]
@@ -86,6 +88,9 @@ impl Default for Config {
     }
 }
 
+/// Raw CLI arguments (clap). These are overlaid onto [`Config`] in
+/// [`load_config`]; `Option` fields are `None` when absent so they don't
+/// clobber lower-precedence sources.
 #[derive(Parser)]
 #[command(
     name = "term-preserver",
@@ -225,6 +230,9 @@ impl From<CliArgs> for CliOverlay {
     }
 }
 
+/// Load [`Config`] by merging defaults < TOML file < environment < CLI. The
+/// config file path comes from `--config` or the XDG default. Invalid values
+/// (e.g. a bad regex filter) surface as errors.
 pub fn load_config(cli_args: CliArgs) -> eyre::Result<Config> {
     let config_path = cli_args.config.clone().unwrap_or_else(default_config_path);
 

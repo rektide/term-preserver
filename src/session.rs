@@ -22,6 +22,7 @@ const BUF_SIZE: usize = 8192;
 /// resets the parser rather than buffering without limit.
 const MAX_PENDING: usize = 16 * 1024;
 
+/// A resolved command to spawn as the PTY child: a program and its argv.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandSpec {
     pub program: String,
@@ -134,6 +135,7 @@ impl Default for ObservedState {
     }
 }
 
+/// How one direction of the relay finished.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelayEnd {
     Completed(u64),
@@ -142,12 +144,17 @@ pub enum RelayEnd {
     Panicked,
 }
 
+/// How both relay threads (stdin→PTY and PTY→stdout) finished, produced when
+/// the session joins them after the child exits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayJoinReport {
     pub stdin_to_pty: RelayEnd,
     pub pty_to_stdout: RelayEnd,
 }
 
+/// Everything known after a child session exits: the command that ran, its
+/// exit status, the child pid, a snapshot of the OSC state observed on the
+/// PTY→stdout stream, and how the relay threads finished.
 #[derive(Debug)]
 pub struct SessionExit {
     pub command: CommandSpec,
@@ -177,6 +184,8 @@ impl SessionExit {
     }
 }
 
+/// Normalize an [`std::process::ExitStatus`] into a Unix-style exit code:
+/// `status.code()` when present, otherwise `128 + signal`.
 pub fn exit_code_from_status(exit_status: std::process::ExitStatus) -> i32 {
     match exit_status.code() {
         Some(code) => code,
@@ -211,6 +220,12 @@ pub fn copy_retrying_eintr<R: Read, W: Write>(reader: &mut R, writer: &mut W) ->
     }
 }
 
+/// Relay `reader` → `writer`, observing OSC sequences without modifying the
+/// stream except to honor `strip` filters. Text title captures (OSC 0/1/2) are
+/// passed through [`FilterSet`]; color captures (OSC 4/5/10/11/12) and resets
+/// (104/105/110/111/112) always pass through and are recorded. Captures that
+/// survive filtering are recorded into `observed_state`. Returns the total
+/// number of bytes copied (not counting stripped bytes).
 pub fn copy_pty_to_stdout_with_titles<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,

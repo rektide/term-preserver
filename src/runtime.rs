@@ -12,6 +12,18 @@ use crate::session::SessionExit;
 use crate::signals::{self, ActiveSignalAction, SignalPolicy};
 use crate::terminal::{self, RawTerminalGuard};
 
+/// Events the proxy records about its own operation. Drained from the runtime
+/// event channel; primarily for coordination and diagnostics.
+///
+/// `ChildExited` carries a [`Box<SessionExit>`] rather than the value inline:
+/// an enum's size is that of its largest variant, and `SessionExit` is large
+/// (it owns [`ObservedSlots`] with palette/special `BTreeMap`s). Boxing keeps
+/// every `ProxyEvent` at a single pointer's width instead of hundreds of
+/// bytes. The cost is negligible — the event is sent through an mpsc channel
+/// and recorded, never hot-pathed or read back out.
+///
+/// [`ObservedSlots`]: crate::session::ObservedSlots
+/// [`Box<SessionExit>`]: std::boxed::Box
 #[derive(Debug)]
 pub enum ProxyEvent {
     ChildExited(Box<SessionExit>),

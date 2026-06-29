@@ -2,6 +2,7 @@
 
 use crate::session::{ObservedSlots, SessionExit};
 
+/// The retry-prompt policy decision for a keystroke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptDecision {
     Retry,
@@ -9,6 +10,8 @@ pub enum PromptDecision {
     Ignore,
 }
 
+/// Stateless retry-prompt policy. Maps a prompt keystroke to a [`PromptDecision`]
+/// and formats the status prompt. Pure and testable without spawning the binary.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PromptPolicy;
 
@@ -27,6 +30,8 @@ impl PromptPolicy {
     }
 }
 
+/// Format the post-exit prompt shown to the user: a leading CRLF then the
+/// exit code and the `space=retry q=quit` hint.
 pub fn format_status_prompt(exit_code: i32) -> String {
     format!("\r\n[term-preserver] child exited with code {exit_code}; space=retry q=quit")
 }

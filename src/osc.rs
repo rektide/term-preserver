@@ -67,7 +67,7 @@ pub enum OscCapture {
     /// OSC 104 — reset palette entries. An empty vec resets the whole palette;
     /// otherwise the listed indices are removed.
     ResetPalette(Vec<u32>),
-    /// OSC 105 — reset special-color entries (companion to [`Special`]).
+    /// OSC 105 — reset special-color entries (companion to [`OscCapture::Special`]).
     ResetSpecial(Vec<u32>),
     /// OSC 110 — reset default foreground.
     ResetForeground,
@@ -137,6 +137,14 @@ impl ByteStep {
     }
 }
 
+/// Streaming OSC parser. Feed it bytes one at a time via [`TitleObserver::advance`]
+/// and read [`ByteStep`]s to drive a relay, or query the slot accessors
+/// (`window_title`, `icon_name`, `palette`, `special`, `foreground`,
+/// `background`, `cursor_color`) for the last value seen for each.
+///
+/// The observer is pure: it never performs I/O and holds no locks. The relay
+/// is responsible for mirroring captures into shared observed state and for
+/// applying filters.
 pub struct TitleObserver {
     state: State,
     osc_param: Vec<u8>,
