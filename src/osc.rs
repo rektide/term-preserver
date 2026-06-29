@@ -668,6 +668,19 @@ mod tests {
     }
 
     #[test]
+    fn title_text_only_for_text_captures() {
+        // Filtering keys on title_text(): text captures yield Some, color and
+        // reset captures yield None.
+        assert_eq!(OscCapture::Both("x".into()).title_text(), Some("x"));
+        assert_eq!(OscCapture::WindowTitle("x".into()).title_text(), Some("x"));
+        assert_eq!(OscCapture::IconName("x".into()).title_text(), Some("x"));
+        assert!(OscCapture::Foreground(ColorSpec::new("#000")).title_text().is_none());
+        assert!(OscCapture::Palette(vec![]).title_text().is_none());
+        assert!(OscCapture::ResetPalette(vec![]).title_text().is_none());
+        assert!(OscCapture::ResetCursor.title_text().is_none());
+    }
+
+    #[test]
     fn unrecognized_osc_yields_no_capture() {
         let mut obs = TitleObserver::new();
         let caps = advance_captures(&mut obs, b"\x1b]52;c;base64\x07");

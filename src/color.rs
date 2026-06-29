@@ -176,4 +176,24 @@ mod tests {
         assert_eq!(c.raw, "?");
         assert!(c.rgb.is_none());
     }
+
+    #[test]
+    fn rgb_no_slashes_as_single_hex_run() {
+        // Some terminals emit rgb:RRGGBB without slashes.
+        assert_eq!(parse_color_spec("rgb:aabbcc"), Some([0xaa, 0xbb, 0xcc]));
+        assert_eq!(parse_color_spec("rgb:000000"), Some([0, 0, 0]));
+    }
+
+    #[test]
+    fn rgbi_clamps_out_of_range() {
+        // Values > 1 clamp to 255; negatives reject.
+        assert_eq!(parse_color_spec("rgbi:2.0/0.0/0.0"), Some([255, 0, 0]));
+        assert!(parse_color_spec("rgbi:-1/0/0").is_none());
+    }
+
+    #[test]
+    fn whitespace_and_case() {
+        assert_eq!(parse_color_spec("  #AaBBCc  "), Some([0xaa, 0xbb, 0xcc]));
+        assert_eq!(parse_color_spec("RGB:AA/BB/CC"), None); // prefix is case-sensitive
+    }
 }

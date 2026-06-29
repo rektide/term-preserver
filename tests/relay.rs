@@ -131,3 +131,50 @@ fn print_gone_title_when_enabled() {
         "expected pid in gone line, got: {stdout:?}"
     );
 }
+
+#[test]
+fn reemit_restores_fg_bg_cursor() {
+    let output = bin()
+        .unwrap()
+        .args([
+            "--reemit-title",
+            "true",
+            "--",
+            "sh",
+            "-c",
+            "printf '\\033]10;#112233\\007\\033]11;rgb:00/00/00\\007\\033]12;rgbi:1.0/0.0/0.0\\007'",
+        ])
+        .write_stdin("q")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\x1b]10;#112233\x07"),
+        "fg re-emit missing: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("\x1b]11;rgb:00/00/00\x07"),
+        "bg re-emit missing: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("\x1b]12;rgbi:1.0/0.0/0.0\x07"),
+        "cursor re-emit missing: {stdout:?}"
+    );
+}
+
+#[test]
+fn print_gone_title_silent_when_no_title_captured() {
+    // With no window title emitted, the gone line should not appear even when
+    // the flag is on.
+    let output = bin()
+        .unwrap()
+        .args(["--print-gone-title", "true", "--", "sh", "-c", "printf hi"])
+        .write_stdin("q")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("gone:"),
+        "no gone line expected without a title, got: {stdout:?}"
+    );
+}

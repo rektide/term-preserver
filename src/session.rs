@@ -769,4 +769,36 @@ mod tests {
             "color/reset bytes must pass through unchanged"
         );
     }
+
+    #[test]
+    #[cfg(feature = "regex")]
+    fn strip_filter_applies_to_osc0_both() {
+        // OSC 0 sets both slots; a strip+ignore rule must drop its bytes and
+        // record neither window nor icon.
+        let filters = FilterSet::compile(&[rule("^rektide@", true, true)]).unwrap();
+        let (out, slots) = run_relay(b"\x1b]0;rektide@host\x07tail", &filters);
+        assert_eq!(&out, b"tail");
+        assert!(slots.window_title.is_none());
+        assert!(slots.icon_name.is_none());
+    }
+
+    #[test]
+    fn csi_escape_passes_through_alongside_osc() {
+        // Non-OSC escapes (CSI color) must round-trip while OSC is captured.
+        let filters = FilterSet::empty();
+        let (out, slots) = run_relay(b"\x1b[31m\x1b]2;win\x07\x1b[0m", &filters);
+        assert_eq!(&out, b"\x1b[31m\x1b]2;win\x07\x1b[0m");
+        assert_eq!(slots.window_title.as_deref(), Some("win"));
+    }
+
+    #[test]
+    fn overflowed_title_passes_bytes_but_captures_nothing() {
+        // A title beyond the cap is not captured, but its bytes still flow.
+        let filters = FilterSet::empty();
+        let huge = "z".repeat(5000);
+        let input = format!("\x1b]2;{huge}\x07");
+        let (out, slots) = run_relay(input.as_bytes(), &filters);
+        assert_eq!(out, input.as_bytes());
+        assert!(slots.window_title.is_none());
+    }
 }

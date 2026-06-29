@@ -180,6 +180,48 @@ mod tests {
     }
 
     #[test]
+    fn gone_line_none_when_only_icon_or_color_set() {
+        // The gone line is keyed on the window title; icon or colors alone
+        // don't produce one.
+        let slots = ObservedSlots {
+            icon_name: Some("ico".into()),
+            foreground: Some(ColorSpec::new("#123456")),
+            ..Default::default()
+        };
+        assert!(format_gone_line(&slots, 7).is_none());
+    }
+
+    #[test]
+    fn reemit_full_state_round_trips_every_slot_kind() {
+        let mut palette = BTreeMap::new();
+        palette.insert(8, ColorSpec::new("#001122"));
+        let mut special = BTreeMap::new();
+        special.insert(1, ColorSpec::new("rgb:aa/bb/cc"));
+        let slots = ObservedSlots {
+            window_title: Some("win".into()),
+            icon_name: Some("ico".into()),
+            palette,
+            special,
+            foreground: Some(ColorSpec::new("#111111")),
+            background: Some(ColorSpec::new("#222222")),
+            cursor_color: Some(ColorSpec::new("#333333")),
+        };
+        let s = String::from_utf8(reemit_sequences(&slots)).unwrap();
+        assert!(s.contains("\x1b]1;ico\x07"));
+        assert!(s.contains("\x1b]2;win\x07"));
+        assert!(s.contains("\x1b]4;8;#001122\x07"));
+        assert!(s.contains("\x1b]5;1;rgb:aa/bb/cc\x07"));
+        assert!(s.contains("\x1b]10;#111111\x07"));
+        assert!(s.contains("\x1b]11;#222222\x07"));
+        assert!(s.contains("\x1b]12;#333333\x07"));
+    }
+
+    #[test]
+    fn reemit_empty_state_emits_nothing() {
+        assert!(reemit_sequences(&ObservedSlots::default()).is_empty());
+    }
+
+    #[test]
     fn prompt_policy_maps_keys() {
         let exit = SessionExit {
             command: crate::session::CommandSpec {
