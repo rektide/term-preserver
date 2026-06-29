@@ -51,6 +51,7 @@ pub struct ObservedSlots {
     pub window_title: Option<String>,
     pub icon_name: Option<String>,
     pub palette: BTreeMap<u32, ColorSpec>,
+    pub special: BTreeMap<u32, ColorSpec>,
     pub foreground: Option<ColorSpec>,
     pub background: Option<ColorSpec>,
     pub cursor_color: Option<ColorSpec>,
@@ -86,9 +87,35 @@ impl ObservedState {
                         guard.palette.insert(*index, spec.clone());
                     }
                 }
+                OscCapture::Special(entries) => {
+                    for (index, spec) in entries {
+                        guard.special.insert(*index, spec.clone());
+                    }
+                }
                 OscCapture::Foreground(spec) => guard.foreground = Some(spec.clone()),
                 OscCapture::Background(spec) => guard.background = Some(spec.clone()),
                 OscCapture::Cursor(spec) => guard.cursor_color = Some(spec.clone()),
+                OscCapture::ResetPalette(indices) => {
+                    if indices.is_empty() {
+                        guard.palette.clear();
+                    } else {
+                        for i in indices {
+                            guard.palette.remove(i);
+                        }
+                    }
+                }
+                OscCapture::ResetSpecial(indices) => {
+                    if indices.is_empty() {
+                        guard.special.clear();
+                    } else {
+                        for i in indices {
+                            guard.special.remove(i);
+                        }
+                    }
+                }
+                OscCapture::ResetForeground => guard.foreground = None,
+                OscCapture::ResetBackground => guard.background = None,
+                OscCapture::ResetCursor => guard.cursor_color = None,
             }
         }
     }
@@ -706,5 +733,25 @@ mod tests {
         let (_out, slots) = run_relay(b"\x1b]1;ico\x07\x1b]2;win\x07", &filters);
         assert_eq!(slots.icon_name.as_deref(), Some("ico"));
         assert_eq!(slots.window_title.as_deref(), Some("win"));
+    }
+
+    #[test]
+    fn special_colors_and_resets_recorded_at_relay() {
+        let filters = FilterSet::empty();
+        let (_out, slots) = run_relay(
+            b"\x1b]5;1;#aabbcc\x07\x1b]4;0;rgb:00/00/00\x07",
+            &filters,
+        );
+        assert_eq!(slots.special.get(&1).map(|c| c.rgb), Some(Some([0xaa, 0xbb, 0xcc])));
+        assert_eq!(slots.palette.get(&0).map(|c| c.rgb), Some(Some([0, 0, 0])));
+
+        // A whole-palette reset (param-only OSC 104) clears it.
+        let (_out, slots) = run_relay(b"\x1b]4;0;rgb:00/00/00\x07\x1b]104\x07", &filters);
+        assert!(slots.palette.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&_out),
+            "\x1b]4;0;rgb:00/00/00\x07\x1b]104\x07",
+            "color/reset bytes must pass through unchanged"
+        );
     }
 }

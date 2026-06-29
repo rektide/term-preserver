@@ -50,6 +50,13 @@ pub fn reemit_sequences(slots: &ObservedSlots) -> Vec<u8> {
         }
         out.extend(format!("\x1b]{body}\x07").bytes());
     }
+    if !slots.special.is_empty() {
+        let mut body = String::from("5");
+        for (index, spec) in &slots.special {
+            body.push_str(&format!(";{index};{}", spec.raw));
+        }
+        out.extend(format!("\x1b]{body}\x07").bytes());
+    }
     if let Some(spec) = &slots.foreground {
         out.extend(format!("\x1b]10;{}\x07", spec.raw).bytes());
     }
@@ -118,6 +125,22 @@ mod tests {
         let seq = reemit_sequences(&slots);
         let s = String::from_utf8(seq).unwrap();
         assert!(s.contains("\x1b]4;0;#aabbcc;1;rgb:00/00/00\x07"));
+    }
+
+    #[test]
+    fn reemit_special_colors() {
+        let mut special = BTreeMap::new();
+        special.insert(1, ColorSpec::new("#abcdef"));
+        let slots = ObservedSlots {
+            special,
+            ..Default::default()
+        };
+        let s = String::from_utf8(reemit_sequences(&slots)).unwrap();
+        assert!(s.contains("\x1b]5;1;#abcdef\x07"));
+        assert!(
+            !s.contains("\x1b]4;"),
+            "palette re-emit should be absent when only special colors are set"
+        );
     }
 
     #[test]

@@ -55,12 +55,26 @@ pub enum OscCapture {
     WindowTitle(String),
     /// OSC 4 — one or more palette entries (index → spec).
     Palette(Vec<(u32, ColorSpec)>),
+    /// OSC 5 — one or more special-color entries (index → spec), e.g. bold,
+    /// underline, etc. Same grammar as palette.
+    Special(Vec<(u32, ColorSpec)>),
     /// OSC 10 — default foreground.
     Foreground(ColorSpec),
     /// OSC 11 — default background.
     Background(ColorSpec),
     /// OSC 12 — text cursor color.
     Cursor(ColorSpec),
+    /// OSC 104 — reset palette entries. An empty vec resets the whole palette;
+    /// otherwise the listed indices are removed.
+    ResetPalette(Vec<u32>),
+    /// OSC 105 — reset special-color entries (companion to [`Special`]).
+    ResetSpecial(Vec<u32>),
+    /// OSC 110 — reset default foreground.
+    ResetForeground,
+    /// OSC 111 — reset default background.
+    ResetBackground,
+    /// OSC 112 — reset text cursor color.
+    ResetCursor,
 }
 
 impl OscCapture {
@@ -133,6 +147,7 @@ pub struct TitleObserver {
     window_title: Option<String>,
     icon_name: Option<String>,
     palette: BTreeMap<u32, ColorSpec>,
+    special: BTreeMap<u32, ColorSpec>,
     foreground: Option<ColorSpec>,
     background: Option<ColorSpec>,
     cursor_color: Option<ColorSpec>,
@@ -148,6 +163,7 @@ impl TitleObserver {
             window_title: None,
             icon_name: None,
             palette: BTreeMap::new(),
+            special: BTreeMap::new(),
             foreground: None,
             background: None,
             cursor_color: None,
@@ -197,6 +213,18 @@ impl TitleObserver {
                     ByteStep::hold()
                 } else if byte.is_ascii_digit() {
                     self.osc_param.push(byte);
+                    ByteStep::hold()
+                } else if byte == BEL {
+                    // Param-only termination (e.g. OSC 104 with no args). Finish
+                    // with an empty data buffer.
+                    let capture = self.finish_osc();
+                    ByteStep {
+                        flush_pending: false,
+                        byte: ByteAction::Hold,
+                        completed: Some(OscCompletion { capture }),
+                    }
+                } else if byte == ESC {
+                    self.state = State::OscEsc;
                     ByteStep::hold()
                 } else {
                     self.abort_to_ground(byte)
@@ -292,6 +320,17 @@ impl TitleObserver {
                     Some(OscCapture::Palette(entries))
                 }
             }
+            "5" => {
+                let entries = parse_palette(&self.osc_data);
+                for (index, spec) in &entries {
+                    self.special.insert(*index, spec.clone());
+                }
+                if entries.is_empty() {
+                    None
+                } else {
+                    Some(OscCapture::Special(entries))
+                }
+            }
             "10" => {
                 let spec = ColorSpec::new(first_segment(&self.osc_data));
                 self.foreground = Some(spec.clone());
@@ -306,6 +345,40 @@ impl TitleObserver {
                 let spec = ColorSpec::new(first_segment(&self.osc_data));
                 self.cursor_color = Some(spec.clone());
                 Some(OscCapture::Cursor(spec))
+            }
+            "104" => {
+                let indices = parse_indices(&self.osc_data);
+                if indices.is_empty() {
+                    self.palette.clear();
+                } else {
+                    for i in &indices {
+                        self.palette.remove(i);
+                    }
+                }
+                Some(OscCapture::ResetPalette(indices))
+            }
+            "105" => {
+                let indices = parse_indices(&self.osc_data);
+                if indices.is_empty() {
+                    self.special.clear();
+                } else {
+                    for i in &indices {
+                        self.special.remove(i);
+                    }
+                }
+                Some(OscCapture::ResetSpecial(indices))
+            }
+            "110" => {
+                self.foreground = None;
+                Some(OscCapture::ResetForeground)
+            }
+            "111" => {
+                self.background = None;
+                Some(OscCapture::ResetBackground)
+            }
+            "112" => {
+                self.cursor_color = None;
+                Some(OscCapture::ResetCursor)
             }
             _ => None,
         };
@@ -337,6 +410,10 @@ impl TitleObserver {
 
     pub fn palette(&self) -> &BTreeMap<u32, ColorSpec> {
         &self.palette
+    }
+
+    pub fn special(&self) -> &BTreeMap<u32, ColorSpec> {
+        &self.special
     }
 
     pub fn foreground(&self) -> Option<&ColorSpec> {
@@ -381,6 +458,15 @@ fn parse_palette(data: &[u8]) -> Vec<(u32, ColorSpec)> {
 fn first_segment(data: &[u8]) -> String {
     let s = String::from_utf8_lossy(data);
     s.split(';').next().unwrap_or_default().to_string()
+}
+
+/// Parse OSC 104/105 reset data (`N;N;...`, or empty for "reset all") into a
+/// list of indices. Non-numeric tokens are skipped.
+fn parse_indices(data: &[u8]) -> Vec<u32> {
+    let s = String::from_utf8_lossy(data);
+    s.split(';')
+        .filter_map(|t| t.trim().parse::<u32>().ok())
+        .collect()
 }
 
 #[cfg(test)]
@@ -490,6 +576,87 @@ mod tests {
         assert_eq!(obs.foreground().unwrap().rgb, Some([0x11, 0x22, 0x33]));
         assert_eq!(obs.background().unwrap().rgb, Some([0, 0, 0]));
         assert_eq!(obs.cursor_color().unwrap().rgb, Some([255, 0, 0]));
+    }
+
+    #[test]
+    fn osc5_captures_special_colors() {
+        let mut obs = TitleObserver::new();
+        let caps = advance_captures(&mut obs, b"\x1b]5;1;#aabbcc\x07");
+        assert_eq!(
+            caps,
+            vec![OscCapture::Special(vec![(
+                1,
+                ColorSpec {
+                    raw: "#aabbcc".into(),
+                    rgb: Some([0xaa, 0xbb, 0xcc])
+                }
+            )])]
+        );
+        assert_eq!(obs.special().get(&1).map(|c| c.rgb), Some(Some([0xaa, 0xbb, 0xcc])));
+        assert!(obs.palette().is_empty(), "OSC 5 must not touch the palette");
+    }
+
+    #[test]
+    fn osc104_resets_palette_entries() {
+        let mut obs = TitleObserver::new();
+        advance_captures(&mut obs, b"\x1b]4;0;#111111;1;#222222\x07");
+        assert_eq!(obs.palette().len(), 2);
+
+        // Reset a single entry.
+        let caps = advance_captures(&mut obs, b"\x1b]104;0\x07");
+        assert_eq!(caps, vec![OscCapture::ResetPalette(vec![0])]);
+        assert_eq!(obs.palette().len(), 1);
+        assert!(!obs.palette().contains_key(&0));
+
+        // Reset all (param-only, no semicolon).
+        let caps = advance_captures(&mut obs, b"\x1b]104\x07");
+        assert_eq!(caps, vec![OscCapture::ResetPalette(vec![])]);
+        assert!(obs.palette().is_empty());
+    }
+
+    #[test]
+    fn osc105_resets_special_entries() {
+        let mut obs = TitleObserver::new();
+        advance_captures(&mut obs, b"\x1b]5;1;#aabbcc\x07");
+        assert_eq!(obs.special().len(), 1);
+        let caps = advance_captures(&mut obs, b"\x1b]105\x07");
+        assert_eq!(caps, vec![OscCapture::ResetSpecial(vec![])]);
+        assert!(obs.special().is_empty());
+    }
+
+    #[test]
+    fn osc110_111_112_reset_fg_bg_cursor() {
+        let mut obs = TitleObserver::new();
+        advance_captures(&mut obs, b"\x1b]10;#111111\x07");
+        advance_captures(&mut obs, b"\x1b]11;#222222\x07");
+        advance_captures(&mut obs, b"\x1b]12;#333333\x07");
+        assert!(obs.foreground().is_some());
+
+        let caps = advance_captures(&mut obs, b"\x1b]110\x07");
+        assert_eq!(caps, vec![OscCapture::ResetForeground]);
+        assert!(obs.foreground().is_none());
+        assert!(obs.background().is_some());
+
+        advance_captures(&mut obs, b"\x1b]111\x07");
+        assert!(obs.background().is_none());
+        advance_captures(&mut obs, b"\x1b]112\x07");
+        assert!(obs.cursor_color().is_none());
+    }
+
+    #[test]
+    fn param_only_osc_terminates_with_bel() {
+        // OSC 104 with no args is a bare param followed by BEL — it must
+        // complete, not abort.
+        let mut obs = TitleObserver::new();
+        let caps = advance_captures(&mut obs, b"\x1b]104\x07");
+        assert_eq!(caps, vec![OscCapture::ResetPalette(vec![])]);
+    }
+
+    #[test]
+    fn param_only_osc_terminates_with_st() {
+        let mut obs = TitleObserver::new();
+        let caps = advance_captures(&mut obs, b"\x1b]110\x1b\\");
+        assert_eq!(caps, vec![OscCapture::ResetForeground]);
     }
 
     #[test]
