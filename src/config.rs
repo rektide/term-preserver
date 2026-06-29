@@ -30,6 +30,9 @@ pub struct Config {
     #[serde(default = "default_reemit_title")]
     pub reemit_title: bool,
 
+    #[serde(default = "default_print_gone_title")]
+    pub print_gone_title: bool,
+
     #[serde(default)]
     pub title_filters: Vec<TitleFilterRule>,
 
@@ -64,6 +67,10 @@ fn default_reemit_title() -> bool {
     false
 }
 
+fn default_print_gone_title() -> bool {
+    false
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -72,6 +79,7 @@ impl Default for Config {
             forward_signals: default_forward_signals(),
             shutdown_signals: default_shutdown_signals(),
             reemit_title: default_reemit_title(),
+            print_gone_title: default_print_gone_title(),
             title_filters: Vec::new(),
             launch: LaunchConfig::default(),
         }
@@ -98,6 +106,9 @@ pub struct CliArgs {
 
     #[arg(long, help = "Re-emit captured title on child exit")]
     pub reemit_title: Option<bool>,
+
+    #[arg(long, help = "Print \"gone <title> (pid N)\" on child exit")]
+    pub print_gone_title: Option<bool>,
 
     #[arg(long, help = "Shell to run")]
     pub shell: Option<String>,
@@ -140,6 +151,8 @@ struct CliOverlay {
     shutdown_signals: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reemit_title: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    print_gone_title: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     launch: Option<LaunchOverlay>,
 }
@@ -202,6 +215,7 @@ impl From<CliArgs> for CliOverlay {
             forward_signals: args.forward_signals,
             shutdown_signals: args.shutdown_signals,
             reemit_title: args.reemit_title,
+            print_gone_title: args.print_gone_title,
             launch: if launch_overlay.is_set() {
                 Some(launch_overlay)
             } else {

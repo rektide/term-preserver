@@ -1,6 +1,6 @@
 // pattern: Functional Core
 
-use crate::session::SessionExit;
+use crate::session::{ObservedSlots, SessionExit};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptDecision {
@@ -31,13 +31,50 @@ pub fn format_status_prompt(exit_code: i32) -> String {
     format!("\r\n[term-preserver] child exited with code {exit_code}; space=retry q=quit")
 }
 
-pub fn title_reemit_sequence(title: &str) -> Vec<u8> {
-    format!("\x1b]2;{title}\x07").into_bytes()
+/// Reconstruct OSC sequences from captured state so the outer terminal's
+/// title/icon/color can be restored on child exit. Uses the raw color specs so
+/// the round trip is faithful. Emits OSC 1 (icon), OSC 2 (window title),
+/// OSC 4 (palette, chained), OSC 10/11/12 (fg/bg/cursor).
+pub fn reemit_sequences(slots: &ObservedSlots) -> Vec<u8> {
+    let mut out = Vec::new();
+    if let Some(icon) = &slots.icon_name {
+        out.extend(format!("\x1b]1;{icon}\x07").bytes());
+    }
+    if let Some(title) = &slots.window_title {
+        out.extend(format!("\x1b]2;{title}\x07").bytes());
+    }
+    if !slots.palette.is_empty() {
+        let mut body = String::from("4");
+        for (index, spec) in &slots.palette {
+            body.push_str(&format!(";{index};{}", spec.raw));
+        }
+        out.extend(format!("\x1b]{body}\x07").bytes());
+    }
+    if let Some(spec) = &slots.foreground {
+        out.extend(format!("\x1b]10;{}\x07", spec.raw).bytes());
+    }
+    if let Some(spec) = &slots.background {
+        out.extend(format!("\x1b]11;{}\x07", spec.raw).bytes());
+    }
+    if let Some(spec) = &slots.cursor_color {
+        out.extend(format!("\x1b]12;{}\x07", spec.raw).bytes());
+    }
+    out
+}
+
+/// A visible, human-readable "gone" line for the captured window title and pid,
+/// printed at the exit boundary so the user can see what title the exiting
+/// process owned. Distinct from [`reemit_sequences`], which is invisible.
+pub fn format_gone_line(slots: &ObservedSlots, child_pid: u32) -> Option<String> {
+    let title = slots.window_title.as_deref()?;
+    Some(format!("\r\n[term-preserver] gone: {title} (pid {child_pid})"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::ColorSpec;
+    use std::collections::BTreeMap;
 
     #[test]
     fn prompt_includes_exit_code() {
@@ -53,9 +90,65 @@ mod tests {
     }
 
     #[test]
-    fn title_reemit_sequence_format() {
-        let seq = title_reemit_sequence("my-title");
-        assert_eq!(seq, b"\x1b]2;my-title\x07");
+    fn reemit_window_and_icon() {
+        let mut slots = ObservedSlots {
+            window_title: Some("win".into()),
+            icon_name: Some("ico".into()),
+            ..Default::default()
+        };
+        let seq = reemit_sequences(&slots);
+        let s = String::from_utf8(seq).unwrap();
+        assert!(s.contains("\x1b]1;ico\x07"));
+        assert!(s.contains("\x1b]2;win\x07"));
+
+        slots.icon_name = None;
+        let seq = reemit_sequences(&slots);
+        assert!(!String::from_utf8(seq).unwrap().contains("\x1b]1;"));
+    }
+
+    #[test]
+    fn reemit_palette_chains_entries() {
+        let mut palette = BTreeMap::new();
+        palette.insert(0, ColorSpec::new("#aabbcc"));
+        palette.insert(1, ColorSpec::new("rgb:00/00/00"));
+        let slots = ObservedSlots {
+            palette,
+            ..Default::default()
+        };
+        let seq = reemit_sequences(&slots);
+        let s = String::from_utf8(seq).unwrap();
+        assert!(s.contains("\x1b]4;0;#aabbcc;1;rgb:00/00/00\x07"));
+    }
+
+    #[test]
+    fn reemit_fg_bg_cursor() {
+        let slots = ObservedSlots {
+            foreground: Some(ColorSpec::new("#111111")),
+            background: Some(ColorSpec::new("#222222")),
+            cursor_color: Some(ColorSpec::new("#333333")),
+            ..Default::default()
+        };
+        let s = String::from_utf8(reemit_sequences(&slots)).unwrap();
+        assert!(s.contains("\x1b]10;#111111\x07"));
+        assert!(s.contains("\x1b]11;#222222\x07"));
+        assert!(s.contains("\x1b]12;#333333\x07"));
+    }
+
+    #[test]
+    fn gone_line_uses_window_title_and_pid() {
+        let slots = ObservedSlots {
+            window_title: Some("user@host".into()),
+            ..Default::default()
+        };
+        let line = format_gone_line(&slots, 4242).unwrap();
+        assert!(line.contains("gone: user@host"));
+        assert!(line.contains("pid 4242"));
+    }
+
+    #[test]
+    fn gone_line_none_without_title() {
+        let slots = ObservedSlots::default();
+        assert!(format_gone_line(&slots, 1).is_none());
     }
 
     #[test]
@@ -71,7 +164,8 @@ mod tests {
                 .arg("exit 7")
                 .status()
                 .unwrap(),
-            last_title: None,
+            child_pid: 1234,
+            observed: ObservedSlots::default(),
             relay_report: crate::session::RelayJoinReport {
                 stdin_to_pty: crate::session::RelayEnd::Completed(0),
                 pty_to_stdout: crate::session::RelayEnd::Completed(0),

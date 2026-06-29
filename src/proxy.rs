@@ -22,15 +22,22 @@ pub struct RetryLoop {
     command: CommandSpec,
     prompt_policy: PromptPolicy,
     reemit_title: bool,
+    print_gone_title: bool,
     filters: Arc<FilterSet>,
 }
 
 impl RetryLoop {
-    pub fn new(command: CommandSpec, reemit_title: bool, filters: Arc<FilterSet>) -> Self {
+    pub fn new(
+        command: CommandSpec,
+        reemit_title: bool,
+        print_gone_title: bool,
+        filters: Arc<FilterSet>,
+    ) -> Self {
         Self {
             command,
             prompt_policy: PromptPolicy,
             reemit_title,
+            print_gone_title,
             filters,
         }
     }
@@ -42,13 +49,14 @@ impl RetryLoop {
             }
 
             let exit = ChildSession::run(self.command.clone(), runtime, self.filters.clone())?;
-            runtime.record_event(ProxyEvent::ChildExited(SessionExit {
+            runtime.record_event(ProxyEvent::ChildExited(Box::new(SessionExit {
                 command: exit.command.clone(),
                 exit_code: exit.exit_code,
                 raw_status: exit.raw_status,
-                last_title: exit.last_title.clone(),
+                child_pid: exit.child_pid,
+                observed: exit.observed.clone(),
                 relay_report: exit.relay_report.clone(),
-            }));
+            })));
 
             if let Some(reason) = runtime.shutdown_requested() {
                 return Ok(reason.exit_code());
@@ -78,10 +86,20 @@ impl RetryLoop {
     }
 
     fn write_post_exit_output(&self, exit: &SessionExit) -> eyre::Result<()> {
+        // Invisible restore: re-emit captured OSC state (title/icon/color).
         if self.reemit_title {
-            if let Some(ref title) = exit.last_title {
-                let seq = prompt::title_reemit_sequence(title);
+            let seq = prompt::reemit_sequences(&exit.observed);
+            if !seq.is_empty() {
                 io::stdout().write_all(&seq)?;
+                io::stdout().flush()?;
+            }
+        }
+
+        // Visible record: print "gone <title> (pid N)" so the user can see what
+        // the exiting process owned. Orthogonal to the invisible re-emit above.
+        if self.print_gone_title {
+            if let Some(line) = prompt::format_gone_line(&exit.observed, exit.child_pid) {
+                io::stdout().write_all(line.as_bytes())?;
                 io::stdout().flush()?;
             }
         }
@@ -131,6 +149,6 @@ pub fn run(config: Config) -> eyre::Result<i32> {
         FilterSet::compile(&config.title_filters).wrap_err("compiling title filters")?,
     );
     let mut runtime = ProxyRuntime::enter(&signal_policy)?;
-    let mut retry_loop = RetryLoop::new(command, config.reemit_title, filters);
+    let mut retry_loop = RetryLoop::new(command, config.reemit_title, config.print_gone_title, filters);
     retry_loop.run(&mut runtime)
 }

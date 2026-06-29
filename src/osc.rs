@@ -1,4 +1,4 @@
-// Functional core: OSC title parser with deterministic state machine.
+// Functional core: OSC parser with deterministic state machine.
 //
 // The parser observes one byte at a time, holding state across read-buffer
 // boundaries. To support *stripping* title sequences from the byte stream, it
@@ -11,9 +11,24 @@
 // On transitions where a held candidate turns out to be something else (e.g.
 // `ESC [` is a CSI, not OSC), the parser sets `flush_pending` so the relay
 // drains its pending buffer before handling the current byte. When an OSC
-// sequence completes, the parser emits an [`OscCompletion`] carrying the title
-// (for codes 0/1/2) or `None` (other codes / overflow). The relay then decides
-// whether to drop or flush the pending sequence and whether to record the title.
+// sequence completes, the parser emits an [`OscCompletion`] carrying a typed
+// [`OscCapture`] describing which slot changed (or `None` for unrecognized /
+// overflowed sequences). The relay then decides whether to drop or flush the
+// pending sequence, applies title filters to text captures, and records the
+// capture in shared observed state.
+//
+// Recognized slots (per xterm ctlseqs):
+//   OSC 0          -> window title AND icon name (same value)
+//   OSC 1          -> icon name
+//   OSC 2          -> window title
+//   OSC 4;N;SPEC   -> palette entry N (may chain several in one sequence)
+//   OSC 10;SPEC    -> default foreground
+//   OSC 11;SPEC    -> default background
+//   OSC 12;SPEC    -> text cursor color
+
+use std::collections::BTreeMap;
+
+use crate::color::ColorSpec;
 
 const TITLE_CAP: usize = 4096;
 
@@ -29,6 +44,45 @@ enum State {
     OscEsc,
 }
 
+/// A completed OSC sequence's effect on observed state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OscCapture {
+    /// OSC 0 — sets both window title and icon name to the same value.
+    Both(String),
+    /// OSC 1 — icon name.
+    IconName(String),
+    /// OSC 2 — window title.
+    WindowTitle(String),
+    /// OSC 4 — one or more palette entries (index → spec).
+    Palette(Vec<(u32, ColorSpec)>),
+    /// OSC 10 — default foreground.
+    Foreground(ColorSpec),
+    /// OSC 11 — default background.
+    Background(ColorSpec),
+    /// OSC 12 — text cursor color.
+    Cursor(ColorSpec),
+}
+
+impl OscCapture {
+    /// The title text, if this is a text-bearing capture (window/icon/both).
+    /// Used so the relay can apply title filters uniformly.
+    pub fn title_text(&self) -> Option<&str> {
+        match self {
+            OscCapture::Both(v) | OscCapture::IconName(v) | OscCapture::WindowTitle(v) => {
+                Some(v)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Signaled when the byte just consumed terminated an OSC sequence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OscCompletion {
+    /// The capture, or `None` for unrecognized / overflowed sequences.
+    pub capture: Option<OscCapture>,
+}
+
 /// What the relay should do with the byte just consumed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ByteAction {
@@ -37,14 +91,6 @@ pub enum ByteAction {
     /// Append the byte to the pending buffer; it may belong to a sequence
     /// under inspection.
     Hold,
-}
-
-/// Signaled when the byte just consumed terminated an OSC sequence.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OscCompletion {
-    /// The captured title for OSC codes 0/1/2; `None` for other codes or when
-    /// the data buffer overflowed and the title could not be captured.
-    pub title: Option<String>,
 }
 
 /// Result of feeding one byte to the observer.
@@ -82,7 +128,14 @@ pub struct TitleObserver {
     osc_param: Vec<u8>,
     osc_data: Vec<u8>,
     osc_overflowed: bool,
-    current_title: Option<String>,
+    // Observer's own bookkeeping: the last value seen for each slot. The relay
+    // mirrors these into shared observed state (subject to filtering).
+    window_title: Option<String>,
+    icon_name: Option<String>,
+    palette: BTreeMap<u32, ColorSpec>,
+    foreground: Option<ColorSpec>,
+    background: Option<ColorSpec>,
+    cursor_color: Option<ColorSpec>,
 }
 
 impl TitleObserver {
@@ -92,7 +145,12 @@ impl TitleObserver {
             osc_param: Vec::new(),
             osc_data: Vec::new(),
             osc_overflowed: false,
-            current_title: None,
+            window_title: None,
+            icon_name: None,
+            palette: BTreeMap::new(),
+            foreground: None,
+            background: None,
+            cursor_color: None,
         }
     }
 
@@ -146,11 +204,11 @@ impl TitleObserver {
             }
             State::OscData => {
                 if byte == BEL {
-                    let title = self.finish_osc();
+                    let capture = self.finish_osc();
                     ByteStep {
                         flush_pending: false,
                         byte: ByteAction::Hold,
-                        completed: Some(OscCompletion { title }),
+                        completed: Some(OscCompletion { capture }),
                     }
                 } else if byte == ESC {
                     self.state = State::OscEsc;
@@ -166,11 +224,11 @@ impl TitleObserver {
             }
             State::OscEsc => {
                 if byte == b'\\' {
-                    let title = self.finish_osc();
+                    let capture = self.finish_osc();
                     ByteStep {
                         flush_pending: false,
                         byte: ByteAction::Hold,
-                        completed: Some(OscCompletion { title }),
+                        completed: Some(OscCompletion { capture }),
                     }
                 } else {
                     self.abort_to_ground(byte)
@@ -200,22 +258,59 @@ impl TitleObserver {
         }
     }
 
-    fn finish_osc(&mut self) -> Option<String> {
+    fn finish_osc(&mut self) -> Option<OscCapture> {
         if self.osc_overflowed {
             self.reset();
             return None;
         }
         let param = String::from_utf8_lossy(&self.osc_param);
-        let is_title = param == "0" || param == "1" || param == "2";
-        let result = if is_title {
-            let title = String::from_utf8_lossy(&self.osc_data).into_owned();
-            self.current_title = Some(title.clone());
-            Some(title)
-        } else {
-            None
+        let capture = match param.as_ref() {
+            "0" => {
+                let value = String::from_utf8_lossy(&self.osc_data).into_owned();
+                self.window_title = Some(value.clone());
+                self.icon_name = Some(value.clone());
+                Some(OscCapture::Both(value))
+            }
+            "1" => {
+                let value = String::from_utf8_lossy(&self.osc_data).into_owned();
+                self.icon_name = Some(value.clone());
+                Some(OscCapture::IconName(value))
+            }
+            "2" => {
+                let value = String::from_utf8_lossy(&self.osc_data).into_owned();
+                self.window_title = Some(value.clone());
+                Some(OscCapture::WindowTitle(value))
+            }
+            "4" => {
+                let entries = parse_palette(&self.osc_data);
+                for (index, spec) in &entries {
+                    self.palette.insert(*index, spec.clone());
+                }
+                if entries.is_empty() {
+                    None
+                } else {
+                    Some(OscCapture::Palette(entries))
+                }
+            }
+            "10" => {
+                let spec = ColorSpec::new(first_segment(&self.osc_data));
+                self.foreground = Some(spec.clone());
+                Some(OscCapture::Foreground(spec))
+            }
+            "11" => {
+                let spec = ColorSpec::new(first_segment(&self.osc_data));
+                self.background = Some(spec.clone());
+                Some(OscCapture::Background(spec))
+            }
+            "12" => {
+                let spec = ColorSpec::new(first_segment(&self.osc_data));
+                self.cursor_color = Some(spec.clone());
+                Some(OscCapture::Cursor(spec))
+            }
+            _ => None,
         };
         self.reset();
-        result
+        capture
     }
 
     fn reset(&mut self) {
@@ -232,9 +327,28 @@ impl TitleObserver {
         self.reset();
     }
 
-    #[allow(dead_code)]
-    pub fn current_title(&self) -> Option<&str> {
-        self.current_title.as_deref()
+    pub fn window_title(&self) -> Option<&str> {
+        self.window_title.as_deref()
+    }
+
+    pub fn icon_name(&self) -> Option<&str> {
+        self.icon_name.as_deref()
+    }
+
+    pub fn palette(&self) -> &BTreeMap<u32, ColorSpec> {
+        &self.palette
+    }
+
+    pub fn foreground(&self) -> Option<&ColorSpec> {
+        self.foreground.as_ref()
+    }
+
+    pub fn background(&self) -> Option<&ColorSpec> {
+        self.background.as_ref()
+    }
+
+    pub fn cursor_color(&self) -> Option<&ColorSpec> {
+        self.cursor_color.as_ref()
     }
 }
 
@@ -244,64 +358,147 @@ impl Default for TitleObserver {
     }
 }
 
+/// Parse OSC 4 palette data (`N;SPEC;N;SPEC;...`) into (index, spec) pairs.
+/// Malformed pairs are skipped rather than aborting the whole batch.
+fn parse_palette(data: &[u8]) -> Vec<(u32, ColorSpec)> {
+    let s = String::from_utf8_lossy(data);
+    let mut parts = s.split(';');
+    let mut out = Vec::new();
+    while let Some(index) = parts.next() {
+        if let Some(spec) = parts.next() {
+            if let Ok(i) = index.parse::<u32>() {
+                if !spec.is_empty() {
+                    out.push((i, ColorSpec::new(spec)));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// First `;`-delimited segment of the data, as a String. OSC 10/11/12 take a
+/// single color spec; a trailing chained spec is ignored.
+fn first_segment(data: &[u8]) -> String {
+    let s = String::from_utf8_lossy(data);
+    s.split(';').next().unwrap_or_default().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Drive the observer over `bytes`, collecting completed titles and the
-    /// emitted output stream (held bytes are emitted on flush / completion so
-    /// the result mirrors what a non-stripping relay would write).
-    fn advance_bytes(observer: &mut TitleObserver, bytes: &[u8]) -> Vec<String> {
-        let mut titles = Vec::new();
-        let mut pending: Vec<u8> = Vec::new();
+    /// Drive the observer over `bytes`, collecting completed captures.
+    fn advance_captures(observer: &mut TitleObserver, bytes: &[u8]) -> Vec<OscCapture> {
+        let mut captures = Vec::new();
         for &b in bytes {
             let step = observer.advance(b);
-            if step.flush_pending {
-                pending.clear();
-            }
-            match step.byte {
-                ByteAction::Emit => {}
-                ByteAction::Hold => pending.push(b),
-            }
             if let Some(completion) = step.completed {
-                pending.clear();
-                if let Some(title) = completion.title {
-                    titles.push(title);
+                if let Some(cap) = completion.capture {
+                    captures.push(cap);
                 }
             }
         }
-        titles
+        captures
     }
 
     #[test]
-    fn osc2_bel_captures_title() {
+    fn osc2_bel_captures_window_title() {
         let mut obs = TitleObserver::new();
-        let titles = advance_bytes(&mut obs, b"\x1b]2;my-title\x07");
-        assert_eq!(titles, vec!["my-title".to_string()]);
-        assert_eq!(obs.current_title(), Some("my-title"));
+        let caps = advance_captures(&mut obs, b"\x1b]2;my-title\x07");
+        assert_eq!(caps, vec![OscCapture::WindowTitle("my-title".into())]);
+        assert_eq!(obs.window_title(), Some("my-title"));
+        assert!(obs.icon_name().is_none());
     }
 
     #[test]
-    fn osc0_st_captures_title() {
+    fn osc0_sets_both_window_and_icon() {
         let mut obs = TitleObserver::new();
-        let titles = advance_bytes(&mut obs, b"\x1b]0;title\x1b\\");
-        assert_eq!(titles, vec!["title".to_string()]);
-        assert_eq!(obs.current_title(), Some("title"));
+        let caps = advance_captures(&mut obs, b"\x1b]0;title\x1b\\");
+        assert_eq!(caps, vec![OscCapture::Both("title".into())]);
+        assert_eq!(obs.window_title(), Some("title"));
+        assert_eq!(obs.icon_name(), Some("title"));
     }
 
     #[test]
-    fn osc1_captures_icon_title() {
+    fn osc1_captures_icon_only() {
         let mut obs = TitleObserver::new();
-        let titles = advance_bytes(&mut obs, b"\x1b]1;icon\x07");
-        assert_eq!(titles, vec!["icon".to_string()]);
+        let caps = advance_captures(&mut obs, b"\x1b]1;icon\x07");
+        assert_eq!(caps, vec![OscCapture::IconName("icon".into())]);
+        assert_eq!(obs.icon_name(), Some("icon"));
+        assert!(obs.window_title().is_none());
     }
 
     #[test]
-    fn non_title_osc_does_not_change_title() {
+    fn osc2_does_not_clobber_icon() {
         let mut obs = TitleObserver::new();
-        let titles = advance_bytes(&mut obs, b"\x1b]4;color\x07");
-        assert!(titles.is_empty());
-        assert!(obs.current_title().is_none());
+        advance_captures(&mut obs, b"\x1b]1;myicon\x07");
+        advance_captures(&mut obs, b"\x1b]2;mywin\x07");
+        assert_eq!(obs.icon_name(), Some("myicon"));
+        assert_eq!(obs.window_title(), Some("mywin"));
+    }
+
+    #[test]
+    fn osc1_does_not_clobber_window() {
+        let mut obs = TitleObserver::new();
+        advance_captures(&mut obs, b"\x1b]2;mywin\x07");
+        advance_captures(&mut obs, b"\x1b]1;myicon\x07");
+        assert_eq!(obs.window_title(), Some("mywin"));
+        assert_eq!(obs.icon_name(), Some("myicon"));
+    }
+
+    #[test]
+    fn osc4_captures_palette_entry() {
+        let mut obs = TitleObserver::new();
+        let caps = advance_captures(&mut obs, b"\x1b]4;0;rgb:aa/bb/cc\x07");
+        assert_eq!(
+            caps,
+            vec![OscCapture::Palette(vec![(
+                0,
+                ColorSpec {
+                    raw: "rgb:aa/bb/cc".into(),
+                    rgb: Some([0xaa, 0xbb, 0xcc])
+                }
+            )])]
+        );
+        // Palette changes do not touch window/icon titles.
+        assert!(obs.window_title().is_none());
+        assert_eq!(
+            obs.palette().get(&0).map(|c| c.rgb),
+            Some(Some([0xaa, 0xbb, 0xcc]))
+        );
+    }
+
+    #[test]
+    fn osc4_chains_multiple_palette_entries() {
+        let mut obs = TitleObserver::new();
+        let caps = advance_captures(&mut obs, b"\x1b]4;1;#abc;2;#def\x07");
+        let OscCapture::Palette(entries) = &caps[0] else {
+            panic!("expected palette capture");
+        };
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, 1);
+        assert_eq!(entries[1].0, 2);
+        assert_eq!(obs.palette().len(), 2);
+    }
+
+    #[test]
+    fn osc10_11_12_capture_fg_bg_cursor() {
+        let mut obs = TitleObserver::new();
+        advance_captures(&mut obs, b"\x1b]10;#112233\x07");
+        advance_captures(&mut obs, b"\x1b]11;rgb:00/00/00\x07");
+        advance_captures(&mut obs, b"\x1b]12;rgbi:1.0/0.0/0.0\x07");
+        assert_eq!(obs.foreground().unwrap().rgb, Some([0x11, 0x22, 0x33]));
+        assert_eq!(obs.background().unwrap().rgb, Some([0, 0, 0]));
+        assert_eq!(obs.cursor_color().unwrap().rgb, Some([255, 0, 0]));
+    }
+
+    #[test]
+    fn unrecognized_osc_yields_no_capture() {
+        let mut obs = TitleObserver::new();
+        let caps = advance_captures(&mut obs, b"\x1b]52;c;base64\x07");
+        assert!(caps.is_empty());
+        assert!(obs.window_title().is_none());
+        assert!(obs.foreground().is_none());
     }
 
     #[test]
@@ -309,60 +506,50 @@ mod tests {
         let mut obs = TitleObserver::new();
         let long_title: String = "x".repeat(250);
         let input = format!("\x1b]2;{long_title}\x07");
-        let titles = advance_bytes(&mut obs, input.as_bytes());
-        assert_eq!(titles.len(), 1);
-        assert_eq!(titles[0].len(), 250);
-        assert_eq!(titles[0], long_title);
+        let caps = advance_captures(&mut obs, input.as_bytes());
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0], OscCapture::WindowTitle(long_title));
     }
 
     #[test]
     fn byte_at_a_time_captures_title() {
         let mut obs = TitleObserver::new();
         let bytes = b"\x1b]2;split-title\x07";
-        let mut titles = Vec::new();
-        let mut pending: Vec<u8> = Vec::new();
+        let mut caps = Vec::new();
         for &b in bytes {
             let step = obs.advance(b);
-            if step.flush_pending {
-                pending.clear();
-            }
-            match step.byte {
-                ByteAction::Emit => {}
-                ByteAction::Hold => pending.push(b),
-            }
             if let Some(completion) = step.completed {
-                pending.clear();
-                if let Some(title) = completion.title {
-                    titles.push(title);
+                if let Some(cap) = completion.capture {
+                    caps.push(cap);
                 }
             }
         }
-        assert_eq!(titles, vec!["split-title".to_string()]);
+        assert_eq!(caps, vec![OscCapture::WindowTitle("split-title".into())]);
     }
 
     #[test]
     fn malformed_osc_does_not_panic() {
         let mut obs = TitleObserver::new();
-        advance_bytes(&mut obs, b"\x1b]abc\x07");
-        let titles = advance_bytes(&mut obs, b"\x1b]2;ok\x07");
-        assert_eq!(titles, vec!["ok".to_string()]);
+        advance_captures(&mut obs, b"\x1b]abc\x07");
+        let caps = advance_captures(&mut obs, b"\x1b]2;ok\x07");
+        assert_eq!(caps, vec![OscCapture::WindowTitle("ok".into())]);
     }
 
     #[test]
-    fn over_cap_sequence_ignored() {
+    fn over_cap_sequence_yields_no_capture() {
         let mut obs = TitleObserver::new();
         let long: String = "y".repeat(TITLE_CAP + 100);
         let input = format!("\x1b]2;{long}\x07");
-        let titles = advance_bytes(&mut obs, input.as_bytes());
-        assert!(titles.is_empty());
-        assert!(obs.current_title().is_none());
+        let caps = advance_captures(&mut obs, input.as_bytes());
+        assert!(caps.is_empty());
+        assert!(obs.window_title().is_none());
     }
 
     #[test]
     fn osc_esc_st_terminates() {
         let mut obs = TitleObserver::new();
-        let titles = advance_bytes(&mut obs, b"\x1b]2;test\x1b\\");
-        assert_eq!(titles, vec!["test".to_string()]);
+        let caps = advance_captures(&mut obs, b"\x1b]2;test\x1b\\");
+        assert_eq!(caps, vec![OscCapture::WindowTitle("test".into())]);
     }
 
     /// A relay that reproduces the stream so we can assert byte dispositions.
@@ -379,9 +566,8 @@ mod tests {
                 ByteAction::Emit => out.push(b),
                 ByteAction::Hold => pending.push(b),
             }
-            if let Some(completion) = step.completed {
+            if step.completed.is_some() {
                 // Non-stripping relay: always flush.
-                let _ = completion;
                 out.extend_from_slice(&pending);
                 pending.clear();
             }
@@ -392,7 +578,6 @@ mod tests {
     #[test]
     fn non_osc_escape_passes_through() {
         let mut obs = TitleObserver::new();
-        // CSI sequence should round-trip byte-for-byte.
         let stream = relay_stream(&mut obs, b"\x1b[31mhi");
         assert_eq!(stream, b"\x1b[31mhi");
     }
@@ -414,8 +599,6 @@ mod tests {
     #[test]
     fn esc_then_osc_passes_both() {
         let mut obs = TitleObserver::new();
-        // A stray ESC immediately followed by an OSC: the lone ESC is flushed,
-        // then the OSC is processed normally.
         let stream = relay_stream(&mut obs, b"\x1b\x1b]2;t\x07");
         assert_eq!(stream, b"\x1b\x1b]2;t\x07");
     }

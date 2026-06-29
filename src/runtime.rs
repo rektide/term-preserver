@@ -14,7 +14,7 @@ use crate::terminal::{self, RawTerminalGuard};
 
 #[derive(Debug)]
 pub enum ProxyEvent {
-    ChildExited(SessionExit),
+    ChildExited(Box<SessionExit>),
     SignalReceived(Signal),
     PromptKey(u8),
     ShutdownRequested(ShutdownReason),

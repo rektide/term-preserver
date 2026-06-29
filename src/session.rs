@@ -1,5 +1,6 @@
 // pattern: Imperative Shell
 
+use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,8 +10,9 @@ use std::time::Duration;
 
 use eyre::WrapErr;
 
+use crate::color::ColorSpec;
 use crate::filter::FilterSet;
-use crate::osc::{ByteAction, TitleObserver};
+use crate::osc::{ByteAction, OscCapture, TitleObserver};
 use crate::runtime::{ActiveSessionGuard, ProxyRuntime};
 use crate::terminal;
 
@@ -41,30 +43,65 @@ impl TryFrom<Vec<String>> for CommandSpec {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct TitleState {
-    inner: Arc<Mutex<Option<String>>>,
+/// A snapshot of everything the proxy observed on the PTY→stdout stream:
+/// window title (OSC 2), icon name (OSC 1), and terminal color state
+/// (OSC 4 palette, OSC 10/11/12 fg/bg/cursor).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObservedSlots {
+    pub window_title: Option<String>,
+    pub icon_name: Option<String>,
+    pub palette: BTreeMap<u32, ColorSpec>,
+    pub foreground: Option<ColorSpec>,
+    pub background: Option<ColorSpec>,
+    pub cursor_color: Option<ColorSpec>,
 }
 
-impl TitleState {
+/// Thread-shared observed state. The relay thread records captures here as it
+/// parses; the session reads a snapshot on child exit. Filtering is applied by
+/// the relay *before* recording, so ignored captures never reach the slots.
+#[derive(Debug, Clone)]
+pub struct ObservedState {
+    inner: Arc<Mutex<ObservedSlots>>,
+}
+
+impl ObservedState {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(None)),
+            inner: Arc::new(Mutex::new(ObservedSlots::default())),
         }
     }
 
-    pub fn set(&self, title: String) {
+    /// Record a capture into the appropriate slot(s).
+    pub fn record(&self, capture: &OscCapture) {
         if let Ok(mut guard) = self.inner.lock() {
-            *guard = Some(title);
+            match capture {
+                OscCapture::Both(value) => {
+                    guard.window_title = Some(value.clone());
+                    guard.icon_name = Some(value.clone());
+                }
+                OscCapture::WindowTitle(value) => guard.window_title = Some(value.clone()),
+                OscCapture::IconName(value) => guard.icon_name = Some(value.clone()),
+                OscCapture::Palette(entries) => {
+                    for (index, spec) in entries {
+                        guard.palette.insert(*index, spec.clone());
+                    }
+                }
+                OscCapture::Foreground(spec) => guard.foreground = Some(spec.clone()),
+                OscCapture::Background(spec) => guard.background = Some(spec.clone()),
+                OscCapture::Cursor(spec) => guard.cursor_color = Some(spec.clone()),
+            }
         }
     }
 
-    pub fn latest(&self) -> Option<String> {
-        self.inner.lock().ok().and_then(|guard| guard.clone())
+    pub fn snapshot(&self) -> ObservedSlots {
+        self.inner
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
     }
 }
 
-impl Default for TitleState {
+impl Default for ObservedState {
     fn default() -> Self {
         Self::new()
     }
@@ -89,7 +126,8 @@ pub struct SessionExit {
     pub command: CommandSpec,
     pub exit_code: i32,
     pub raw_status: std::process::ExitStatus,
-    pub last_title: Option<String>,
+    pub child_pid: u32,
+    pub observed: ObservedSlots,
     pub relay_report: RelayJoinReport,
 }
 
@@ -97,14 +135,16 @@ impl SessionExit {
     pub fn from_status(
         command: CommandSpec,
         raw_status: std::process::ExitStatus,
-        last_title: Option<String>,
+        child_pid: u32,
+        observed: ObservedSlots,
         relay_report: RelayJoinReport,
     ) -> Self {
         Self {
             command,
             exit_code: exit_code_from_status(raw_status),
             raw_status,
-            last_title,
+            child_pid,
+            observed,
             relay_report,
         }
     }
@@ -147,13 +187,13 @@ pub fn copy_retrying_eintr<R: Read, W: Write>(reader: &mut R, writer: &mut W) ->
 pub fn copy_pty_to_stdout_with_titles<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
-    title_state: TitleState,
+    observed_state: ObservedState,
     filters: Arc<FilterSet>,
 ) -> io::Result<u64> {
     let mut observer = TitleObserver::new();
     let mut buf = [0u8; BUF_SIZE];
     // Bytes that may belong to an in-progress OSC sequence; flushed on
-    // completion (unless the title is stripped) or when the parser aborts.
+    // completion (unless a text title is stripped) or when the parser aborts.
     let mut pending: Vec<u8> = Vec::new();
     let mut out: Vec<u8> = Vec::with_capacity(BUF_SIZE);
     let mut total: u64 = 0;
@@ -178,19 +218,27 @@ pub fn copy_pty_to_stdout_with_titles<R: Read, W: Write>(
             if let Some(completion) = step.completed {
                 // The terminator byte was held above, so `pending` now holds
                 // the entire OSC sequence.
-                match completion.title {
-                    Some(title) => {
-                        let decision = filters.decide(&title);
+                match completion.capture {
+                    Some(capture) if capture.title_text().is_some() => {
+                        // Text title capture (OSC 0/1/2): subject to filtering.
+                        let decision = filters.decide(capture.title_text().unwrap());
                         if !decision.strip {
                             out.extend_from_slice(&pending);
                         }
                         pending.clear();
                         if !decision.ignore {
-                            title_state.set(title);
+                            observed_state.record(&capture);
                         }
                     }
+                    Some(capture) => {
+                        // Color capture (OSC 4/10/11/12): not filtered; always
+                        // pass through and record.
+                        out.extend_from_slice(&pending);
+                        pending.clear();
+                        observed_state.record(&capture);
+                    }
                     None => {
-                        // Non-title OSC or overflowed — always pass through.
+                        // Unrecognized / overflowed OSC — always pass through.
                         out.extend_from_slice(&pending);
                         pending.clear();
                     }
@@ -275,7 +323,7 @@ impl RelayThreads {
         pty_write_fd: std::os::fd::RawFd,
         pty_read_fd: std::os::fd::RawFd,
         child_alive: Arc<AtomicBool>,
-        title_state: TitleState,
+        observed_state: ObservedState,
         filters: Arc<FilterSet>,
     ) -> Self {
         let alive_for_stdin = child_alive.clone();
@@ -287,7 +335,7 @@ impl RelayThreads {
         let pty_to_stdout = thread::spawn(move || {
             let mut pty_reader = unsafe { std::fs::File::from_raw_fd(pty_read_fd) };
             let mut stdout = io::stdout();
-            copy_pty_to_stdout_with_titles(&mut pty_reader, &mut stdout, title_state, filters)
+            copy_pty_to_stdout_with_titles(&mut pty_reader, &mut stdout, observed_state, filters)
         });
 
         Self {
@@ -388,7 +436,7 @@ impl SessionForwarders {
 pub struct ChildSession {
     command: CommandSpec,
     child: std::process::Child,
-    title_state: TitleState,
+    observed_state: ObservedState,
     child_alive: Arc<AtomicBool>,
     relays: RelayThreads,
     forwarders: SessionForwarders,
@@ -412,7 +460,7 @@ impl ChildSession {
             .wrap_err_with(|| format!("spawning child command: {}", command.program))?;
 
         let child_alive = Arc::new(AtomicBool::new(true));
-        let title_state = TitleState::new();
+        let observed_state = ObservedState::new();
         let stdin_fd = io::stdin().as_raw_fd();
 
         let pty_write_fd = unsafe { dup_fd(pty.as_raw_fd())? };
@@ -428,14 +476,14 @@ impl ChildSession {
             pty_write_fd,
             pty_read_fd,
             child_alive.clone(),
-            title_state.clone(),
+            observed_state.clone(),
             filters,
         );
 
         Ok(Self {
             command,
             child,
-            title_state,
+            observed_state,
             child_alive,
             relays,
             forwarders: SessionForwarders {
@@ -446,6 +494,7 @@ impl ChildSession {
     }
 
     pub fn wait(mut self) -> eyre::Result<SessionExit> {
+        let child_pid = self.child.id();
         let raw_status = self.child.wait()?;
         self.child_alive.store(false, Ordering::Relaxed);
         self.forwarders.stop();
@@ -453,7 +502,8 @@ impl ChildSession {
         Ok(SessionExit::from_status(
             self.command,
             raw_status,
-            self.title_state.latest(),
+            child_pid,
+            self.observed_state.snapshot(),
             relay_report,
         ))
     }
@@ -518,21 +568,23 @@ mod tests {
     }
 
     #[test]
-    fn title_state_snapshots_latest_title() {
-        let state = TitleState::new();
-        state.set("first".into());
-        state.set("second".into());
-        assert_eq!(state.latest(), Some("second".into()));
+    fn observed_state_records_window_and_icon_separately() {
+        let state = ObservedState::new();
+        state.record(&OscCapture::WindowTitle("win".into()));
+        state.record(&OscCapture::IconName("ico".into()));
+        let snap = state.snapshot();
+        assert_eq!(snap.window_title.as_deref(), Some("win"));
+        assert_eq!(snap.icon_name.as_deref(), Some("ico"));
     }
 
     // --- title filtering at the relay -------------------------------------
 
     use crate::filter::{FilterSet, TitleFilterRule};
 
-    fn run_relay(input: &[u8], filters: &FilterSet) -> (Vec<u8>, Option<String>) {
+    fn run_relay(input: &[u8], filters: &FilterSet) -> (Vec<u8>, ObservedSlots) {
         let mut reader = Cursor::new(input.to_vec());
         let mut writer = Vec::new();
-        let state = TitleState::new();
+        let state = ObservedState::new();
         let _ = copy_pty_to_stdout_with_titles(
             &mut reader,
             &mut writer,
@@ -540,7 +592,7 @@ mod tests {
             Arc::new(filters.clone()),
         )
         .unwrap();
-        (writer, state.latest())
+        (writer, state.snapshot())
     }
 
     fn rule(pattern: &str, strip: bool, ignore: bool) -> TitleFilterRule {
@@ -554,9 +606,9 @@ mod tests {
     #[test]
     fn no_filters_passes_through_and_captures() {
         let filters = FilterSet::empty();
-        let (out, title) = run_relay(b"\x1b]2;rektide@host\x07tail", &filters);
+        let (out, slots) = run_relay(b"\x1b]2;rektide@host\x07tail", &filters);
         assert_eq!(&out, b"\x1b]2;rektide@host\x07tail");
-        assert_eq!(title.as_deref(), Some("rektide@host"));
+        assert_eq!(slots.window_title.as_deref(), Some("rektide@host"));
     }
 
     #[test]
@@ -564,10 +616,10 @@ mod tests {
         // strip and ignore are independent: strip=true, ignore=false drops the
         // OSC bytes from the stream but STILL records the title internally.
         let filters = FilterSet::compile(&[rule("^rektide@", true, false)]).unwrap();
-        let (out, title) = run_relay(b"\x1b]2;rektide@host\x07tail", &filters);
+        let (out, slots) = run_relay(b"\x1b]2;rektide@host\x07tail", &filters);
         assert_eq!(&out, b"tail", "OSC bytes must be stripped from stream");
         assert_eq!(
-            title.as_deref(),
+            slots.window_title.as_deref(),
             Some("rektide@host"),
             "ignore=false must still record the title"
         );
@@ -576,29 +628,29 @@ mod tests {
     #[test]
     fn strip_with_ignore_drops_bytes_and_state() {
         let filters = FilterSet::compile(&[rule("^rektide@", true, true)]).unwrap();
-        let (out, title) = run_relay(b"\x1b]2;rektide@host\x07tail", &filters);
+        let (out, slots) = run_relay(b"\x1b]2;rektide@host\x07tail", &filters);
         assert_eq!(&out, b"tail");
-        assert!(title.is_none());
+        assert!(slots.window_title.is_none());
     }
 
     #[test]
     fn ignore_keeps_sequence_but_skips_state() {
         let filters = FilterSet::compile(&[rule("^rektide@", false, true)]).unwrap();
-        let (out, title) = run_relay(b"\x1b]2;rektide@host\x07tail", &filters);
+        let (out, slots) = run_relay(b"\x1b]2;rektide@host\x07tail", &filters);
         assert_eq!(
             &out,
             b"\x1b]2;rektide@host\x07tail",
             "OSC bytes must pass through under ignore-only"
         );
-        assert!(title.is_none(), "title state must not record ignored title");
+        assert!(slots.window_title.is_none(), "title state must not record ignored title");
     }
 
     #[test]
     fn non_matching_title_passes_through() {
         let filters = FilterSet::compile(&[rule("^rektide@", true, true)]).unwrap();
-        let (out, title) = run_relay(b"\x1b]2;other@host\x07tail", &filters);
+        let (out, slots) = run_relay(b"\x1b]2;other@host\x07tail", &filters);
         assert_eq!(&out, b"\x1b]2;other@host\x07tail");
-        assert_eq!(title.as_deref(), Some("other@host"));
+        assert_eq!(slots.window_title.as_deref(), Some("other@host"));
     }
 
     #[test]
@@ -606,9 +658,9 @@ mod tests {
         // A non-ignored title sets state; a later ignored title leaves it.
         let input = b"\x1b]2;keep\x07\x1b]2;rektide@host\x07";
         let filters = FilterSet::compile(&[rule("^rektide@", false, true)]).unwrap();
-        let (out, title) = run_relay(input, &filters);
+        let (out, slots) = run_relay(input, &filters);
         assert_eq!(&out, input);
-        assert_eq!(title.as_deref(), Some("keep"));
+        assert_eq!(slots.window_title.as_deref(), Some("keep"));
     }
 
     #[test]
@@ -618,17 +670,27 @@ mod tests {
             rule("@host$", false, true),
         ])
         .unwrap();
-        let (out, title) = run_relay(b"\x1b]2;rektide@host\x07", &filters);
+        let (out, slots) = run_relay(b"\x1b]2;rektide@host\x07", &filters);
         assert!(out.is_empty(), "combined strip must drop the sequence");
-        assert!(title.is_none(), "combined ignore must skip the state");
+        assert!(slots.window_title.is_none(), "combined ignore must skip the state");
     }
 
     #[test]
-    fn non_title_osc_passes_through_under_strip_filter() {
-        // OSC 4 (color) is not a title — must never be stripped.
+    fn color_osc_is_captured_but_never_filtered() {
+        // OSC 4 is a color slot, not a title — it must pass through and be
+        // recorded even when a catch-all title filter is configured.
         let filters = FilterSet::compile(&[rule(".*", true, true)]).unwrap();
-        let (out, title) = run_relay(b"\x1b]4;color\x07", &filters);
-        assert_eq!(&out, b"\x1b]4;color\x07");
-        assert!(title.is_none());
+        let (out, slots) = run_relay(b"\x1b]4;0;rgb:aa/bb/cc\x07tail", &filters);
+        assert_eq!(&out, b"\x1b]4;0;rgb:aa/bb/cc\x07tail");
+        assert_eq!(slots.palette.get(&0).map(|c| c.rgb), Some(Some([0xaa, 0xbb, 0xcc])));
+        assert!(slots.window_title.is_none());
+    }
+
+    #[test]
+    fn icon_and_window_captured_independently_at_relay() {
+        let filters = FilterSet::empty();
+        let (_out, slots) = run_relay(b"\x1b]1;ico\x07\x1b]2;win\x07", &filters);
+        assert_eq!(slots.icon_name.as_deref(), Some("ico"));
+        assert_eq!(slots.window_title.as_deref(), Some("win"));
     }
 }
