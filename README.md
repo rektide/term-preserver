@@ -306,7 +306,8 @@ RetryLoop
   ├── ChildSession::spawn → wait → SessionExit
   │     ├── RelayThreads (stdin→PTY, PTY→stdout + title observer)
   │     ├── SignalForwarder (process-group forwarding via runtime)
-  │     └── ResizeForwarder (SIGWINCH → TIOCSWINSZ)
+  │     ├── ResizeForwarder (SIGWINCH → TIOCSWINSZ)
+  │     └── TmuxSampler (local tmux only: polls server by client PID → TmuxState)
   └── PromptPolicy (pure: byte → Retry/Exit/Ignore decision)
 ```
 
@@ -320,11 +321,17 @@ Each resource with a distinct lifetime gets a small owner:
   completion (normal EOF, expected PTY close/EIO, stdin cancellation, panic).
 - **`SignalForwarder`** — per-session child process-group forwarding.
 - **`ResizeForwarder`** — per-session `SIGWINCH` propagation to the child PTY.
+- **`TmuxSampler`** — per-session, local-tmux-only: polls the tmux server every
+  ~20s, correlates the spawned client to its session by PID, and caches the last
+  sample in `TmuxState` so the session id / inner command survive child exit.
 - **`PromptPolicy`** — pure function mapping prompt keystrokes to retry/exit
   decisions. Testable without spawning the binary.
 - **`LaunchConfig`** — pure pipeline resolving the composable launch flags
   (`--shell`, `--ssh`, `--mosh`, `--tmux`, `--dir`) into a `CommandSpec`. Reads
-  no I/O; `$SHELL` is injected by the caller.
+  no I/O; `$SHELL` is injected by the caller. Also derives a focused
+  `LaunchContext` (tmux target + transport) that moves through execution to feed
+  the sampler — only a *local* tmux server is reachable by the local `tmux`
+  binary, so remote transports yield no sample.
 
 ### Module layout
 
@@ -335,7 +342,7 @@ src/
   color.rs       ColorSpec + parse_color_spec (rgb:/rgbi:/# → 24-bit)
   config.rs      figment2 config loading, Config/CliArgs types
   filter.rs      TitleFilterRule (config), FilterSet (compiled), FilterDecision
-  launch.rs      LaunchConfig: shell detection, tmux/transport composition, resolution
+  launch.rs      LaunchConfig: shell detection, tmux/transport composition, resolution; LaunchContext
   runtime.rs     ProxyRuntime, event channel, signal coordinator
   session.rs     ChildSession, RelayThreads, ObservedState/Slots, SessionExit
   proxy.rs       RetryLoop orchestrator
@@ -343,6 +350,7 @@ src/
   signals.rs     SignalPolicy, signal name parsing, process-group forwarding
   terminal.rs    raw mode guard, winsize queries, PTY sizing
   osc.rs         streaming OSC parser (pure state machine), typed OscCapture
+  tmux.rs        TmuxSampler/TmuxState: local tmux session introspection by client PID
 ```
 
 ### OSC parser

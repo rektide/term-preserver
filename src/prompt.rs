@@ -1,6 +1,7 @@
 // pattern: Functional Core
 
 use crate::session::{ObservedSlots, SessionExit};
+use crate::tmux::TmuxSample;
 
 /// The retry-prompt policy decision for a keystroke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,10 +77,19 @@ pub fn reemit_sequences(slots: &ObservedSlots) -> Vec<u8> {
 
 /// A visible, human-readable "gone" line for the captured window title and pid,
 /// printed at the exit boundary so the user can see what title the exiting
-/// process owned. Distinct from [`reemit_sequences`], which is invisible.
-pub fn format_gone_line(slots: &ObservedSlots, child_pid: u32) -> Option<String> {
+/// process owned. When a tmux sample is present, the session id is appended.
+/// Distinct from [`reemit_sequences`], which is invisible.
+pub fn format_gone_line(
+    slots: &ObservedSlots,
+    child_pid: u32,
+    tmux: Option<&TmuxSample>,
+) -> Option<String> {
     let title = slots.window_title.as_deref()?;
-    Some(format!("\r\n[term-preserver] gone: {title} (pid {child_pid})"))
+    let suffix = match tmux.and_then(|s| s.session_id.as_deref()) {
+        Some(sid) => format!("pid {child_pid}, tmux {sid}"),
+        None => format!("pid {child_pid}"),
+    };
+    Some(format!("\r\n[term-preserver] gone: {title} ({suffix})"))
 }
 
 #[cfg(test)]
@@ -168,15 +178,29 @@ mod tests {
             window_title: Some("user@host".into()),
             ..Default::default()
         };
-        let line = format_gone_line(&slots, 4242).unwrap();
+        let line = format_gone_line(&slots, 4242, None).unwrap();
         assert!(line.contains("gone: user@host"));
         assert!(line.contains("pid 4242"));
     }
 
     #[test]
+    fn gone_line_appends_tmux_session_id() {
+        let slots = ObservedSlots {
+            window_title: Some("user@host".into()),
+            ..Default::default()
+        };
+        let sample = TmuxSample {
+            session_id: Some("$3".into()),
+            ..Default::default()
+        };
+        let line = format_gone_line(&slots, 4242, Some(&sample)).unwrap();
+        assert!(line.contains("tmux $3"));
+    }
+
+    #[test]
     fn gone_line_none_without_title() {
         let slots = ObservedSlots::default();
-        assert!(format_gone_line(&slots, 1).is_none());
+        assert!(format_gone_line(&slots, 1, None).is_none());
     }
 
     #[test]
@@ -188,7 +212,7 @@ mod tests {
             foreground: Some(ColorSpec::new("#123456")),
             ..Default::default()
         };
-        assert!(format_gone_line(&slots, 7).is_none());
+        assert!(format_gone_line(&slots, 7, None).is_none());
     }
 
     #[test]
@@ -236,6 +260,7 @@ mod tests {
                 .unwrap(),
             child_pid: 1234,
             observed: ObservedSlots::default(),
+            tmux: None,
             relay_report: crate::session::RelayJoinReport {
                 stdin_to_pty: crate::session::RelayEnd::Completed(0),
                 pty_to_stdout: crate::session::RelayEnd::Completed(0),

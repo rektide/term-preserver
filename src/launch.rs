@@ -35,6 +35,43 @@ impl TmuxMode {
     }
 }
 
+/// The transport wrapping a resolved launch, if any. Local launches have no
+/// transport; `--ssh`/`--mosh` carry the host. The sampler can only introspect
+/// a *local* tmux server — a remote tmux lives behind ssh/mosh where the local
+/// `tmux` binary cannot reach it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransportKind {
+    Local,
+    Ssh(String),
+    Mosh(String),
+}
+
+/// The minimal, movable summary of a resolved launch that the execution layer
+/// (and the tmux sampler) needs. This is the "good state" derived from
+/// [`LaunchConfig`] at config time and threaded through `RetryLoop →
+/// ChildSession → TmuxSampler`, so the session/tmux layers never depend on the
+/// full config shape.
+///
+/// Derived via [`LaunchConfig::context`] rather than returned from `resolve()`,
+/// keeping argv resolution and introspection context as separate concerns (and
+/// leaving `resolve()`'s signature — and its tests — untouched).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchContext {
+    pub tmux_target: Option<TmuxMode>,
+    pub transport: TransportKind,
+}
+
+impl LaunchContext {
+    /// The tmux target when the server is local and therefore queryable. Remote
+    /// transports hide the tmux server behind ssh/mosh, so `None` there.
+    pub fn local_tmux_target(&self) -> Option<&TmuxMode> {
+        match (&self.transport, &self.tmux_target) {
+            (TransportKind::Local, Some(mode)) => Some(mode),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchConfig {
     #[serde(default)]
@@ -340,6 +377,23 @@ impl LaunchConfig {
     /// an enumeration that silently drifts.
     pub fn is_active(&self) -> bool {
         *self != Self::default()
+    }
+
+    /// Derive the movable [`LaunchContext`] the execution layer needs: the tmux
+    /// target (if any) and the transport. Pure — read it alongside `resolve()`
+    /// in the imperative shell, then thread it through to the sampler.
+    pub fn context(&self) -> LaunchContext {
+        let transport = if let Some(host) = &self.ssh {
+            TransportKind::Ssh(host.clone())
+        } else if let Some(host) = &self.mosh {
+            TransportKind::Mosh(host.clone())
+        } else {
+            TransportKind::Local
+        };
+        LaunchContext {
+            tmux_target: self.tmux_mode(),
+            transport,
+        }
     }
 
     fn validate(&self) -> eyre::Result<()> {
@@ -774,6 +828,48 @@ mod tests {
         let mut l = launch();
         l.login = false;
         assert!(l.is_active());
+    }
+
+    // --- context() / LaunchContext ---
+
+    #[test]
+    fn context_local_has_no_transport() {
+        let l = launch_with_shell("zsh");
+        let ctx = l.context();
+        assert_eq!(ctx.transport, TransportKind::Local);
+        assert!(ctx.tmux_target.is_none());
+        assert!(ctx.local_tmux_target().is_none());
+    }
+
+    #[test]
+    fn context_local_tmux_is_queryable() {
+        let mut l = launch_with_shell("zsh");
+        l.tmux = Some("dev".into());
+        let ctx = l.context();
+        assert_eq!(ctx.transport, TransportKind::Local);
+        assert_eq!(
+            ctx.local_tmux_target(),
+            Some(&TmuxMode::CreateOrAttach("dev".into()))
+        );
+    }
+
+    #[test]
+    fn context_ssh_tmux_is_not_queryable() {
+        // Remote transport hides the tmux server behind ssh: the local `tmux`
+        // binary cannot reach it, so there is no local target to sample.
+        let mut l = launch_with_shell("zsh");
+        l.ssh = Some("w".into());
+        l.tmux = Some("dev".into());
+        let ctx = l.context();
+        assert_eq!(ctx.transport, TransportKind::Ssh("w".into()));
+        assert!(ctx.local_tmux_target().is_none());
+    }
+
+    #[test]
+    fn context_mosh_transport() {
+        let mut l = launch_with_shell("zsh");
+        l.mosh = Some("w".into());
+        assert_eq!(l.context().transport, TransportKind::Mosh("w".into()));
     }
 
     // --- full resolution pipeline ---

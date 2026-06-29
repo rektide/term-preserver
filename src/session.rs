@@ -12,9 +12,11 @@ use eyre::WrapErr;
 
 use crate::color::ColorSpec;
 use crate::filter::FilterSet;
+use crate::launch::LaunchContext;
 use crate::osc::{ByteAction, OscCapture, TitleObserver};
 use crate::runtime::{ActiveSessionGuard, ProxyRuntime};
 use crate::terminal;
+use crate::tmux::{TmuxSample, TmuxSampler, TmuxState};
 
 const BUF_SIZE: usize = 8192;
 /// Upper bound on a buffered candidate OSC sequence. If a sequence never
@@ -154,7 +156,8 @@ pub struct RelayJoinReport {
 
 /// Everything known after a child session exits: the command that ran, its
 /// exit status, the child pid, a snapshot of the OSC state observed on the
-/// PTY→stdout stream, and how the relay threads finished.
+/// PTY→stdout stream, the last tmux sample (if a local tmux was launched), and
+/// how the relay threads finished.
 #[derive(Debug)]
 pub struct SessionExit {
     pub command: CommandSpec,
@@ -162,6 +165,7 @@ pub struct SessionExit {
     pub raw_status: std::process::ExitStatus,
     pub child_pid: u32,
     pub observed: ObservedSlots,
+    pub tmux: Option<TmuxSample>,
     pub relay_report: RelayJoinReport,
 }
 
@@ -171,6 +175,7 @@ impl SessionExit {
         raw_status: std::process::ExitStatus,
         child_pid: u32,
         observed: ObservedSlots,
+        tmux: Option<TmuxSample>,
         relay_report: RelayJoinReport,
     ) -> Self {
         Self {
@@ -179,6 +184,7 @@ impl SessionExit {
             raw_status,
             child_pid,
             observed,
+            tmux,
             relay_report,
         }
     }
@@ -482,6 +488,8 @@ pub struct ChildSession {
     child_alive: Arc<AtomicBool>,
     relays: RelayThreads,
     forwarders: SessionForwarders,
+    tmux_state: Option<TmuxState>,
+    tmux_sampler: Option<TmuxSampler>,
 }
 
 impl ChildSession {
@@ -489,6 +497,7 @@ impl ChildSession {
         command: CommandSpec,
         runtime: &ProxyRuntime,
         filters: Arc<FilterSet>,
+        launch_ctx: LaunchContext,
     ) -> eyre::Result<Self> {
         let (pty, pts) = pty_process::blocking::open().wrap_err("opening PTY")?;
 
@@ -522,6 +531,23 @@ impl ChildSession {
             filters,
         );
 
+        // Only a local tmux server is reachable by the local `tmux` binary, so
+        // the sampler runs exclusively for local tmux targets. It correlates the
+        // spawned client to its session by PID and caches the last sample.
+        let (tmux_state, tmux_sampler) = match launch_ctx.local_tmux_target() {
+            Some(target) => {
+                let state = TmuxState::new();
+                let sampler = TmuxSampler::start(
+                    child_pid,
+                    target.clone(),
+                    child_alive.clone(),
+                    state.clone(),
+                );
+                (Some(state), Some(sampler))
+            }
+            None => (None, None),
+        };
+
         Ok(Self {
             command,
             child,
@@ -532,6 +558,8 @@ impl ChildSession {
                 _signal: signal,
                 resize,
             },
+            tmux_state,
+            tmux_sampler,
         })
     }
 
@@ -541,11 +569,19 @@ impl ChildSession {
         self.child_alive.store(false, Ordering::Relaxed);
         self.forwarders.stop();
         let relay_report = self.relays.join_after_child_exit()?;
+        let tmux = match (self.tmux_sampler.take(), self.tmux_state.as_ref()) {
+            (Some(sampler), Some(state)) => {
+                sampler.stop();
+                state.snapshot()
+            }
+            _ => None,
+        };
         Ok(SessionExit::from_status(
             self.command,
             raw_status,
             child_pid,
             self.observed_state.snapshot(),
+            tmux,
             relay_report,
         ))
     }
@@ -554,8 +590,9 @@ impl ChildSession {
         command: CommandSpec,
         runtime: &ProxyRuntime,
         filters: Arc<FilterSet>,
+        launch_ctx: LaunchContext,
     ) -> eyre::Result<SessionExit> {
-        Self::spawn(command, runtime, filters)?.wait()
+        Self::spawn(command, runtime, filters, launch_ctx)?.wait()
     }
 }
 

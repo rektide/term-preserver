@@ -8,6 +8,7 @@ use eyre::WrapErr;
 
 use crate::config::Config;
 use crate::filter::FilterSet;
+use crate::launch::LaunchContext;
 use crate::prompt::{self, PromptDecision, PromptPolicy};
 use crate::runtime::{ProxyEvent, ProxyRuntime};
 use crate::session::{ChildSession, CommandSpec, SessionExit};
@@ -24,6 +25,7 @@ pub struct RetryLoop {
     reemit_title: bool,
     print_gone_title: bool,
     filters: Arc<FilterSet>,
+    launch_ctx: LaunchContext,
 }
 
 impl RetryLoop {
@@ -32,6 +34,7 @@ impl RetryLoop {
         reemit_title: bool,
         print_gone_title: bool,
         filters: Arc<FilterSet>,
+        launch_ctx: LaunchContext,
     ) -> Self {
         Self {
             command,
@@ -39,6 +42,7 @@ impl RetryLoop {
             reemit_title,
             print_gone_title,
             filters,
+            launch_ctx,
         }
     }
 
@@ -48,13 +52,19 @@ impl RetryLoop {
                 return Ok(reason.exit_code());
             }
 
-            let exit = ChildSession::run(self.command.clone(), runtime, self.filters.clone())?;
+            let exit = ChildSession::run(
+                self.command.clone(),
+                runtime,
+                self.filters.clone(),
+                self.launch_ctx.clone(),
+            )?;
             runtime.record_event(ProxyEvent::ChildExited(Box::new(SessionExit {
                 command: exit.command.clone(),
                 exit_code: exit.exit_code,
                 raw_status: exit.raw_status,
                 child_pid: exit.child_pid,
                 observed: exit.observed.clone(),
+                tmux: exit.tmux.clone(),
                 relay_report: exit.relay_report.clone(),
             })));
 
@@ -98,7 +108,9 @@ impl RetryLoop {
         // Visible record: print "gone <title> (pid N)" so the user can see what
         // the exiting process owned. Orthogonal to the invisible re-emit above.
         if self.print_gone_title {
-            if let Some(line) = prompt::format_gone_line(&exit.observed, exit.child_pid) {
+            if let Some(line) =
+                prompt::format_gone_line(&exit.observed, exit.child_pid, exit.tmux.as_ref())
+            {
                 io::stdout().write_all(line.as_bytes())?;
                 io::stdout().flush()?;
             }
@@ -136,6 +148,7 @@ fn read_prompt_input(runtime: &mut ProxyRuntime) -> eyre::Result<PromptInput> {
 }
 
 pub fn run(config: Config) -> eyre::Result<i32> {
+    let launch_ctx = config.launch.context();
     let command = if config.launch.is_active() {
         let env_shell = std::env::var("SHELL").ok();
         config
@@ -149,6 +162,12 @@ pub fn run(config: Config) -> eyre::Result<i32> {
         FilterSet::compile(&config.title_filters).wrap_err("compiling title filters")?,
     );
     let mut runtime = ProxyRuntime::enter(&signal_policy)?;
-    let mut retry_loop = RetryLoop::new(command, config.reemit_title, config.print_gone_title, filters);
+    let mut retry_loop = RetryLoop::new(
+        command,
+        config.reemit_title,
+        config.print_gone_title,
+        filters,
+        launch_ctx,
+    );
     retry_loop.run(&mut runtime)
 }
