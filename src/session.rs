@@ -595,6 +595,7 @@ mod tests {
         (writer, state.snapshot())
     }
 
+    #[cfg(feature = "regex")]
     fn rule(pattern: &str, strip: bool, ignore: bool) -> TitleFilterRule {
         TitleFilterRule {
             pattern: pattern.into(),
@@ -612,6 +613,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "regex")]
     fn strip_removes_bytes_but_records_state_unless_ignored() {
         // strip and ignore are independent: strip=true, ignore=false drops the
         // OSC bytes from the stream but STILL records the title internally.
@@ -626,6 +628,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "regex")]
     fn strip_with_ignore_drops_bytes_and_state() {
         let filters = FilterSet::compile(&[rule("^rektide@", true, true)]).unwrap();
         let (out, slots) = run_relay(b"\x1b]2;rektide@host\x07tail", &filters);
@@ -634,6 +637,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "regex")]
     fn ignore_keeps_sequence_but_skips_state() {
         let filters = FilterSet::compile(&[rule("^rektide@", false, true)]).unwrap();
         let (out, slots) = run_relay(b"\x1b]2;rektide@host\x07tail", &filters);
@@ -646,6 +650,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "regex")]
     fn non_matching_title_passes_through() {
         let filters = FilterSet::compile(&[rule("^rektide@", true, true)]).unwrap();
         let (out, slots) = run_relay(b"\x1b]2;other@host\x07tail", &filters);
@@ -654,6 +659,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "regex")]
     fn ignore_keeps_previous_title_intact() {
         // A non-ignored title sets state; a later ignored title leaves it.
         let input = b"\x1b]2;keep\x07\x1b]2;rektide@host\x07";
@@ -664,6 +670,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "regex")]
     fn strip_and_ignore_combine_across_rules() {
         let filters = FilterSet::compile(&[
             rule("^rektide@", true, false),
@@ -678,8 +685,15 @@ mod tests {
     #[test]
     fn color_osc_is_captured_but_never_filtered() {
         // OSC 4 is a color slot, not a title — it must pass through and be
-        // recorded even when a catch-all title filter is configured.
-        let filters = FilterSet::compile(&[rule(".*", true, true)]).unwrap();
+        // recorded even when a catch-all title filter is configured. (With the
+        // `regex` feature off the rule is ignored, which still leaves color
+        // unfiltered, so this holds either way.)
+        let catch_all = [TitleFilterRule {
+            pattern: ".*".into(),
+            strip: true,
+            ignore: true,
+        }];
+        let filters = FilterSet::compile(&catch_all).unwrap();
         let (out, slots) = run_relay(b"\x1b]4;0;rgb:aa/bb/cc\x07tail", &filters);
         assert_eq!(&out, b"\x1b]4;0;rgb:aa/bb/cc\x07tail");
         assert_eq!(slots.palette.get(&0).map(|c| c.rgb), Some(Some([0xaa, 0xbb, 0xcc])));
