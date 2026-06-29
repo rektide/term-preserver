@@ -77,3 +77,57 @@ fn reemit_title_when_enabled() {
         "expected at least two OSC title sequences (original + re-emit), got {count}: {stdout:?}"
     );
 }
+
+#[test]
+fn reemit_restores_icon_and_palette() {
+    // OSC 1 (icon) and OSC 4 (palette) should be re-emitted on exit alongside
+    // the window title when --reemit-title is set.
+    let output = bin()
+        .unwrap()
+        .args([
+            "--reemit-title",
+            "true",
+            "--",
+            "sh",
+            "-c",
+            "printf '\\033]1;myicon\\007\\033]4;0;rgb:aa/bb/cc\\007'",
+        ])
+        .write_stdin("q")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\x1b]1;myicon\x07"),
+        "icon re-emit missing: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("\x1b]4;0;rgb:aa/bb/cc\x07"),
+        "palette re-emit missing: {stdout:?}"
+    );
+}
+
+#[test]
+fn print_gone_title_when_enabled() {
+    let output = bin()
+        .unwrap()
+        .args([
+            "--print-gone-title",
+            "true",
+            "--",
+            "sh",
+            "-c",
+            "printf '\\033]2;user@host\\007'",
+        ])
+        .write_stdin("q")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("gone: user@host"),
+        "expected visible gone line, got: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("pid "),
+        "expected pid in gone line, got: {stdout:?}"
+    );
+}

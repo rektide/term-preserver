@@ -9,10 +9,12 @@ adds a composable session launcher (shell / ssh / mosh / tmux), a retry prompt
 when the child exits, and precise signal handling.
 
 > **Status.** The proxy, launcher, retry prompt, and signal handling all work
-> today, and titles can be [filtered](#title-filtering) (suppressed from the
-> stream and/or from internal state). The *title-preservation* behavior the name
-> promises — holding a title across detach and tagging detached sessions — is
-> still on the [roadmap](#roadmap).
+> today. The proxy [observes](#observed-state) window title, icon name, and
+> terminal color, can [filter](#title-filtering) titles (suppress from the
+> stream and/or from internal state), [re-emit](#title-re-emit) captured state,
+> and [print](#gone-title-on-exit) a `gone <title>` line on exit. The
+> *title-preservation* behavior the name promises — holding a title across
+> detach and tagging detached sessions — is still on the [roadmap](#roadmap).
 
 ## Install
 
@@ -128,12 +130,39 @@ When the child exits, the proxy keeps the screen contents and appends:
 The proxy stays in raw mode at the prompt, so keystrokes register immediately
 without Enter.
 
+## Observed state
+
+As bytes flow from the child, the proxy captures more than the window title.
+Each OSC kind updates its own slot:
+
+| OSC | Slot |
+|-----|------|
+| `0` | window title **and** icon name (same value) |
+| `1` | icon name |
+| `2` | window title |
+| `4;N;SPEC` | palette entry `N` (several may chain in one sequence) |
+| `10;SPEC` / `11;SPEC` / `12;SPEC` | default foreground / background / cursor color |
+
+Color specs are parsed to a normalized 24-bit RGB (`rgb:`, `rgbi:`, and `#`
+forms, 1–4 hex digits per channel) alongside the raw spec text, so a slot
+carries the actual color, not just an opaque string. Captured state is
+snapshotted into the exit record for restore and display.
+
 ## Title re-emit
 
-By default the proxy captures OSC title sequences in memory but does nothing
-with them on child exit. Pass `--reemit-title true` to re-emit the last captured
-title to the outer terminal when the child dies — useful when a child (like SSH)
-set a title you want to keep across reconnections.
+By default the proxy captures OSC state in memory but does nothing with it on
+child exit. Pass `--reemit-title true` to re-emit all captured state — window
+title (OSC 2), icon name (OSC 1), palette (OSC 4), and fg/bg/cursor colors
+(OSC 10/11/12) — to the outer terminal when the child dies, reconstructing the
+sequences from the raw specs. Useful when a child (like SSH) set a title or
+palette you want to keep across reconnections.
+
+## "gone" title on exit
+
+Pass `--print-gone-title true` to print a visible `gone <title> (pid N)` line at
+the exit boundary, so you can see what title the exiting process owned. This is
+orthogonal to `--reemit-title`: re-emit is the invisible OSC restore, the gone
+line is a human-readable record. With no window title captured, no line prints.
 
 ## Title filtering
 
@@ -147,7 +176,7 @@ list of regex rules, each with two **independent** actions:
 | `ignore` | Leave the proxy's internal title state untouched, so a later re-emit won't reproduce it. |
 
 The regex is an unanchored search (anchor with `^`/`$` for exact prefixes/suffixes).
-A title matching several rules ORs their actions.
+A title matching several rules ORs its actions.
 
 ```toml
 # Never let the outer terminal show your own user@host, and don't remember it.
@@ -163,7 +192,8 @@ strip   = true
 ```
 
 Both flags default to `false`, and the list is empty by default — no filtering.
-Non-title OSC sequences (e.g. color queries, `OSC 4`) are never stripped.
+Filters apply to text title captures only (OSC 0/1/2); icon-name and color
+slots are tracked unconditionally and never stripped.
 
 ## Signal handling
 
@@ -201,7 +231,8 @@ Config loads via [figment2](https://docs.rs/figment2) with precedence:
 | `--config <path>` | Path to config file | `$XDG_CONFIG_HOME/term-preserver/config.toml` |
 | `--forward-signals <sig…>` | Signals forwarded to the child process group | `SIGTERM SIGHUP` |
 | `--shutdown-signals <sig…>` | Signals that also shut the proxy down | _(empty)_ |
-| `--reemit-title <bool>` | Re-emit captured OSC title on child exit | `false` |
+| `--reemit-title <bool>` | Re-emit captured OSC state (title/icon/color) on child exit | `false` |
+| `--print-gone-title <bool>` | Print `gone <title> (pid N)` on child exit | `false` |
 | `--shell` / `--ssh` / `--mosh` / `--tmux*` / `--dir` / `--no-login` / `--no-interactive` | [Session launcher](#session-launcher) | _none_ |
 | `-- <command…>` | Child command (trailing args) | `$SHELL` |
 
@@ -217,6 +248,7 @@ command = ["bash", "-l"]
 forward_signals = ["SIGTERM", "SIGHUP"]
 shutdown_signals = []
 reemit_title = false
+print_gone_title = false
 
 [[title_filters]]
 pattern = "^rektide@"
@@ -300,19 +332,20 @@ Each resource with a distinct lifetime gets a small owner:
 src/
   main.rs        entry point: CLI parse, config load, delegate to library
   lib.rs         library boundary
+  color.rs       ColorSpec + parse_color_spec (rgb:/rgbi:/# → 24-bit)
   config.rs      figment2 config loading, Config/CliArgs types
   filter.rs      TitleFilterRule (config), FilterSet (compiled), FilterDecision
   launch.rs      LaunchConfig: shell detection, tmux/transport composition, resolution
   runtime.rs     ProxyRuntime, event channel, signal coordinator
-  session.rs     ChildSession, RelayThreads, forwarders, CommandSpec, SessionExit
+  session.rs     ChildSession, RelayThreads, ObservedState/Slots, SessionExit
   proxy.rs       RetryLoop orchestrator
-  prompt.rs      PromptPolicy, prompt formatting (pure)
+  prompt.rs      PromptPolicy, re-emit/gone formatting (pure)
   signals.rs     SignalPolicy, signal name parsing, process-group forwarding
   terminal.rs    raw mode guard, winsize queries, PTY sizing
-  osc.rs         streaming OSC 0/1/2 title parser (pure state machine)
+  osc.rs         streaming OSC parser (pure state machine), typed OscCapture
 ```
 
-### OSC title parser
+### OSC parser
 
 A streaming state machine that processes bytes one at a time, holding state
 across read-buffer boundaries:
@@ -321,8 +354,11 @@ across read-buffer boundaries:
 Ground → ESC → ] → OscParam → ; → OscData → BEL (0x07) or ESC \ → Ground
 ```
 
-OSC codes 0, 1, and 2 are recognized as title-setting sequences. Titles up to
-4096 bytes are captured; longer sequences are ignored to bound memory.
+OSC codes 0/1/2 (window title / icon name), 4 (palette), and 10/11/12
+(fg/bg/cursor) are recognized and routed to their slots. Captures up to 4096
+bytes are kept; longer sequences are ignored to bound memory. The parser also
+classifies each byte (emit / hold / flush) so the relay can strip filtered
+title sequences from the stream byte-for-byte.
 
 ### Design documents
 
@@ -340,11 +376,13 @@ OSC codes 0, 1, and 2 are recognized as title-setting sequences. Titles up to
 | `figment2` | Layered configuration (CLI > env > file > defaults) |
 | `clap` | CLI argument parsing |
 | `bon` | Builder pattern on the config struct |
+| `regex` | Title-filter pattern matching |
 | `eyre` | Error handling |
 
 ## Roadmap
 
 - **preserver mode**: title-preservation state machine — hold a title across detach, reject reverts that don't match the held value. (Title *filtering* — suppressing `user@host` and similar — landed; see [Title filtering](#title-filtering).)
+- richer exit dump: live tmux session id + inner process per window (`tipre-tmux-session-id`), sixel graphics slot (`tipre-sixel-slot`).
 - tag the title with `[d]` when detached, reset to the original on re-attach
 - integrate with `zim-tgo` teleport
 - better-defined attached/detached state machine and transitions
