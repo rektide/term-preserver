@@ -2,10 +2,12 @@
 
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
+use std::sync::Arc;
 
 use eyre::WrapErr;
 
 use crate::config::Config;
+use crate::filter::FilterSet;
 use crate::prompt::{self, PromptDecision, PromptPolicy};
 use crate::runtime::{ProxyEvent, ProxyRuntime};
 use crate::session::{ChildSession, CommandSpec, SessionExit};
@@ -20,14 +22,16 @@ pub struct RetryLoop {
     command: CommandSpec,
     prompt_policy: PromptPolicy,
     reemit_title: bool,
+    filters: Arc<FilterSet>,
 }
 
 impl RetryLoop {
-    pub fn new(command: CommandSpec, reemit_title: bool) -> Self {
+    pub fn new(command: CommandSpec, reemit_title: bool, filters: Arc<FilterSet>) -> Self {
         Self {
             command,
             prompt_policy: PromptPolicy,
             reemit_title,
+            filters,
         }
     }
 
@@ -37,7 +41,7 @@ impl RetryLoop {
                 return Ok(reason.exit_code());
             }
 
-            let exit = ChildSession::run(self.command.clone(), runtime)?;
+            let exit = ChildSession::run(self.command.clone(), runtime, self.filters.clone())?;
             runtime.record_event(ProxyEvent::ChildExited(SessionExit {
                 command: exit.command.clone(),
                 exit_code: exit.exit_code,
@@ -123,7 +127,10 @@ pub fn run(config: Config) -> eyre::Result<i32> {
         CommandSpec::try_from(config.command.clone())?
     };
     let signal_policy = SignalPolicy::from_config(&config).wrap_err("parsing signal policy")?;
+    let filters = Arc::new(
+        FilterSet::compile(&config.title_filters).wrap_err("compiling title filters")?,
+    );
     let mut runtime = ProxyRuntime::enter(&signal_policy)?;
-    let mut retry_loop = RetryLoop::new(command, config.reemit_title);
+    let mut retry_loop = RetryLoop::new(command, config.reemit_title, filters);
     retry_loop.run(&mut runtime)
 }

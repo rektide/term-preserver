@@ -9,11 +9,16 @@ use std::time::Duration;
 
 use eyre::WrapErr;
 
-use crate::osc::TitleObserver;
+use crate::filter::FilterSet;
+use crate::osc::{ByteAction, TitleObserver};
 use crate::runtime::{ActiveSessionGuard, ProxyRuntime};
 use crate::terminal;
 
 const BUF_SIZE: usize = 8192;
+/// Upper bound on a buffered candidate OSC sequence. If a sequence never
+/// terminates (malformed stream), the relay flushes whatever it has held and
+/// resets the parser rather than buffering without limit.
+const MAX_PENDING: usize = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandSpec {
@@ -143,9 +148,14 @@ pub fn copy_pty_to_stdout_with_titles<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
     title_state: TitleState,
+    filters: Arc<FilterSet>,
 ) -> io::Result<u64> {
     let mut observer = TitleObserver::new();
     let mut buf = [0u8; BUF_SIZE];
+    // Bytes that may belong to an in-progress OSC sequence; flushed on
+    // completion (unless the title is stripped) or when the parser aborts.
+    let mut pending: Vec<u8> = Vec::new();
+    let mut out: Vec<u8> = Vec::with_capacity(BUF_SIZE);
     let mut total: u64 = 0;
     loop {
         let n = match reader.read(&mut buf) {
@@ -154,12 +164,45 @@ pub fn copy_pty_to_stdout_with_titles<R: Read, W: Write>(
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         };
+        out.clear();
         for &byte in &buf[..n] {
-            if let Some(title) = observer.advance(byte) {
-                title_state.set(title);
+            let step = observer.advance(byte);
+            if step.flush_pending {
+                out.extend_from_slice(&pending);
+                pending.clear();
+            }
+            match step.byte {
+                ByteAction::Emit => out.push(byte),
+                ByteAction::Hold => pending.push(byte),
+            }
+            if let Some(completion) = step.completed {
+                // The terminator byte was held above, so `pending` now holds
+                // the entire OSC sequence.
+                match completion.title {
+                    Some(title) => {
+                        let decision = filters.decide(&title);
+                        if !decision.strip {
+                            out.extend_from_slice(&pending);
+                        }
+                        pending.clear();
+                        if !decision.ignore {
+                            title_state.set(title);
+                        }
+                    }
+                    None => {
+                        // Non-title OSC or overflowed — always pass through.
+                        out.extend_from_slice(&pending);
+                        pending.clear();
+                    }
+                }
+            }
+            if pending.len() > MAX_PENDING {
+                out.extend_from_slice(&pending);
+                pending.clear();
+                observer.force_reset();
             }
         }
-        writer.write_all(&buf[..n])?;
+        writer.write_all(&out)?;
         writer.flush()?;
         total += n as u64;
     }
@@ -233,6 +276,7 @@ impl RelayThreads {
         pty_read_fd: std::os::fd::RawFd,
         child_alive: Arc<AtomicBool>,
         title_state: TitleState,
+        filters: Arc<FilterSet>,
     ) -> Self {
         let alive_for_stdin = child_alive.clone();
         let stdin_to_pty = thread::spawn(move || {
@@ -243,7 +287,7 @@ impl RelayThreads {
         let pty_to_stdout = thread::spawn(move || {
             let mut pty_reader = unsafe { std::fs::File::from_raw_fd(pty_read_fd) };
             let mut stdout = io::stdout();
-            copy_pty_to_stdout_with_titles(&mut pty_reader, &mut stdout, title_state)
+            copy_pty_to_stdout_with_titles(&mut pty_reader, &mut stdout, title_state, filters)
         });
 
         Self {
@@ -351,7 +395,11 @@ pub struct ChildSession {
 }
 
 impl ChildSession {
-    pub fn spawn(command: CommandSpec, runtime: &ProxyRuntime) -> eyre::Result<Self> {
+    pub fn spawn(
+        command: CommandSpec,
+        runtime: &ProxyRuntime,
+        filters: Arc<FilterSet>,
+    ) -> eyre::Result<Self> {
         let (pty, pts) = pty_process::blocking::open().wrap_err("opening PTY")?;
 
         let size = terminal::terminal_size(&io::stdout())
@@ -381,6 +429,7 @@ impl ChildSession {
             pty_read_fd,
             child_alive.clone(),
             title_state.clone(),
+            filters,
         );
 
         Ok(Self {
@@ -409,8 +458,12 @@ impl ChildSession {
         ))
     }
 
-    pub fn run(command: CommandSpec, runtime: &ProxyRuntime) -> eyre::Result<SessionExit> {
-        Self::spawn(command, runtime)?.wait()
+    pub fn run(
+        command: CommandSpec,
+        runtime: &ProxyRuntime,
+        filters: Arc<FilterSet>,
+    ) -> eyre::Result<SessionExit> {
+        Self::spawn(command, runtime, filters)?.wait()
     }
 }
 
@@ -470,5 +523,112 @@ mod tests {
         state.set("first".into());
         state.set("second".into());
         assert_eq!(state.latest(), Some("second".into()));
+    }
+
+    // --- title filtering at the relay -------------------------------------
+
+    use crate::filter::{FilterSet, TitleFilterRule};
+
+    fn run_relay(input: &[u8], filters: &FilterSet) -> (Vec<u8>, Option<String>) {
+        let mut reader = Cursor::new(input.to_vec());
+        let mut writer = Vec::new();
+        let state = TitleState::new();
+        let _ = copy_pty_to_stdout_with_titles(
+            &mut reader,
+            &mut writer,
+            state.clone(),
+            Arc::new(filters.clone()),
+        )
+        .unwrap();
+        (writer, state.latest())
+    }
+
+    fn rule(pattern: &str, strip: bool, ignore: bool) -> TitleFilterRule {
+        TitleFilterRule {
+            pattern: pattern.into(),
+            strip,
+            ignore,
+        }
+    }
+
+    #[test]
+    fn no_filters_passes_through_and_captures() {
+        let filters = FilterSet::empty();
+        let (out, title) = run_relay(b"\x1b]2;rektide@host\x07tail", &filters);
+        assert_eq!(&out, b"\x1b]2;rektide@host\x07tail");
+        assert_eq!(title.as_deref(), Some("rektide@host"));
+    }
+
+    #[test]
+    fn strip_removes_bytes_but_records_state_unless_ignored() {
+        // strip and ignore are independent: strip=true, ignore=false drops the
+        // OSC bytes from the stream but STILL records the title internally.
+        let filters = FilterSet::compile(&[rule("^rektide@", true, false)]).unwrap();
+        let (out, title) = run_relay(b"\x1b]2;rektide@host\x07tail", &filters);
+        assert_eq!(&out, b"tail", "OSC bytes must be stripped from stream");
+        assert_eq!(
+            title.as_deref(),
+            Some("rektide@host"),
+            "ignore=false must still record the title"
+        );
+    }
+
+    #[test]
+    fn strip_with_ignore_drops_bytes_and_state() {
+        let filters = FilterSet::compile(&[rule("^rektide@", true, true)]).unwrap();
+        let (out, title) = run_relay(b"\x1b]2;rektide@host\x07tail", &filters);
+        assert_eq!(&out, b"tail");
+        assert!(title.is_none());
+    }
+
+    #[test]
+    fn ignore_keeps_sequence_but_skips_state() {
+        let filters = FilterSet::compile(&[rule("^rektide@", false, true)]).unwrap();
+        let (out, title) = run_relay(b"\x1b]2;rektide@host\x07tail", &filters);
+        assert_eq!(
+            &out,
+            b"\x1b]2;rektide@host\x07tail",
+            "OSC bytes must pass through under ignore-only"
+        );
+        assert!(title.is_none(), "title state must not record ignored title");
+    }
+
+    #[test]
+    fn non_matching_title_passes_through() {
+        let filters = FilterSet::compile(&[rule("^rektide@", true, true)]).unwrap();
+        let (out, title) = run_relay(b"\x1b]2;other@host\x07tail", &filters);
+        assert_eq!(&out, b"\x1b]2;other@host\x07tail");
+        assert_eq!(title.as_deref(), Some("other@host"));
+    }
+
+    #[test]
+    fn ignore_keeps_previous_title_intact() {
+        // A non-ignored title sets state; a later ignored title leaves it.
+        let input = b"\x1b]2;keep\x07\x1b]2;rektide@host\x07";
+        let filters = FilterSet::compile(&[rule("^rektide@", false, true)]).unwrap();
+        let (out, title) = run_relay(input, &filters);
+        assert_eq!(&out, input);
+        assert_eq!(title.as_deref(), Some("keep"));
+    }
+
+    #[test]
+    fn strip_and_ignore_combine_across_rules() {
+        let filters = FilterSet::compile(&[
+            rule("^rektide@", true, false),
+            rule("@host$", false, true),
+        ])
+        .unwrap();
+        let (out, title) = run_relay(b"\x1b]2;rektide@host\x07", &filters);
+        assert!(out.is_empty(), "combined strip must drop the sequence");
+        assert!(title.is_none(), "combined ignore must skip the state");
+    }
+
+    #[test]
+    fn non_title_osc_passes_through_under_strip_filter() {
+        // OSC 4 (color) is not a title — must never be stripped.
+        let filters = FilterSet::compile(&[rule(".*", true, true)]).unwrap();
+        let (out, title) = run_relay(b"\x1b]4;color\x07", &filters);
+        assert_eq!(&out, b"\x1b]4;color\x07");
+        assert!(title.is_none());
     }
 }

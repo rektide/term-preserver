@@ -10,6 +10,7 @@ use figment2::providers::{Env, Format, Serialized, Toml};
 use figment2::Figment;
 use serde::{Deserialize, Serialize};
 
+use crate::filter::TitleFilterRule;
 use crate::launch::LaunchConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
@@ -28,6 +29,9 @@ pub struct Config {
 
     #[serde(default = "default_reemit_title")]
     pub reemit_title: bool,
+
+    #[serde(default)]
+    pub title_filters: Vec<TitleFilterRule>,
 
     #[serde(default)]
     pub launch: LaunchConfig,
@@ -68,6 +72,7 @@ impl Default for Config {
             forward_signals: default_forward_signals(),
             shutdown_signals: default_shutdown_signals(),
             reemit_title: default_reemit_title(),
+            title_filters: Vec::new(),
             launch: LaunchConfig::default(),
         }
     }

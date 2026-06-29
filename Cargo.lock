@@ -879,6 +879,7 @@ dependencies = [
  "nix 0.31.3",
  "predicates",
  "pty-process",
+ "regex",
  "serde",
  "serde_json",
  "serial_test",

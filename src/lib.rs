@@ -1,4 +1,5 @@
 pub mod config;
+pub mod filter;
 pub mod launch;
 pub mod osc;
 pub mod prompt;

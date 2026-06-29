@@ -9,9 +9,10 @@ adds a composable session launcher (shell / ssh / mosh / tmux), a retry prompt
 when the child exits, and precise signal handling.
 
 > **Status.** The proxy, launcher, retry prompt, and signal handling all work
-> today. The *title-preservation* behavior the name promises — holding a title
-> across detach and tagging detached sessions — is still on the [roadmap](#roadmap).
-> Right now titles are observed and (optionally) re-emitted, not yet filtered.
+> today, and titles can be [filtered](#title-filtering) (suppressed from the
+> stream and/or from internal state). The *title-preservation* behavior the name
+> promises — holding a title across detach and tagging detached sessions — is
+> still on the [roadmap](#roadmap).
 
 ## Install
 
@@ -134,6 +135,36 @@ with them on child exit. Pass `--reemit-title true` to re-emit the last captured
 title to the outer terminal when the child dies — useful when a child (like SSH)
 set a title you want to keep across reconnections.
 
+## Title filtering
+
+SSH and tmux often stamp the terminal title with `user@host`. The proxy can
+suppress those so the title you chose survives. Configure `title_filters` as a
+list of regex rules, each with two **independent** actions:
+
+| Action  | Effect |
+|---------|--------|
+| `strip`  | Drop the matching OSC sequence from the PTY→stdout byte stream — the *outer* terminal's title is never set to the match. |
+| `ignore` | Leave the proxy's internal title state untouched, so a later re-emit won't reproduce it. |
+
+The regex is an unanchored search (anchor with `^`/`$` for exact prefixes/suffixes).
+A title matching several rules ORs their actions.
+
+```toml
+# Never let the outer terminal show your own user@host, and don't remember it.
+[[title_filters]]
+pattern = "^rektide@"
+strip   = true
+ignore  = true
+
+# Drop "detached" titles from the stream but keep tracking the last real title.
+[[title_filters]]
+pattern = "detached"
+strip   = true
+```
+
+Both flags default to `false`, and the list is empty by default — no filtering.
+Non-title OSC sequences (e.g. color queries, `OSC 4`) are never stripped.
+
 ## Signal handling
 
 The proxy separates process-level shutdown from child forwarding.
@@ -174,6 +205,9 @@ Config loads via [figment2](https://docs.rs/figment2) with precedence:
 | `--shell` / `--ssh` / `--mosh` / `--tmux*` / `--dir` / `--no-login` / `--no-interactive` | [Session launcher](#session-launcher) | _none_ |
 | `-- <command…>` | Child command (trailing args) | `$SHELL` |
 
+`title_filters` is configured via the config file (TOML) or environment only —
+see [Title filtering](#title-filtering).
+
 ### Config file
 
 `~/.config/term-preserver/config.toml`:
@@ -183,6 +217,11 @@ command = ["bash", "-l"]
 forward_signals = ["SIGTERM", "SIGHUP"]
 shutdown_signals = []
 reemit_title = false
+
+[[title_filters]]
+pattern = "^rektide@"
+strip = true
+ignore = true
 
 [launch]
 shell = "zsh"
@@ -262,6 +301,7 @@ src/
   main.rs        entry point: CLI parse, config load, delegate to library
   lib.rs         library boundary
   config.rs      figment2 config loading, Config/CliArgs types
+  filter.rs      TitleFilterRule (config), FilterSet (compiled), FilterDecision
   launch.rs      LaunchConfig: shell detection, tmux/transport composition, resolution
   runtime.rs     ProxyRuntime, event channel, signal coordinator
   session.rs     ChildSession, RelayThreads, forwarders, CommandSpec, SessionExit
@@ -304,7 +344,7 @@ OSC codes 0, 1, and 2 are recognized as title-setting sequences. Titles up to
 
 ## Roadmap
 
-- **preserver mode**: filter title updates to reject/ignore reverts
+- **preserver mode**: title-preservation state machine — hold a title across detach, reject reverts that don't match the held value. (Title *filtering* — suppressing `user@host` and similar — landed; see [Title filtering](#title-filtering).)
 - tag the title with `[d]` when detached, reset to the original on re-attach
 - integrate with `zim-tgo` teleport
 - better-defined attached/detached state machine and transitions

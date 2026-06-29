@@ -1,6 +1,24 @@
 // Functional core: OSC title parser with deterministic state machine.
+//
+// The parser observes one byte at a time, holding state across read-buffer
+// boundaries. To support *stripping* title sequences from the byte stream, it
+// classifies every byte for the relay:
+//
+//   - `Emit`: ordinary data — write straight to the output.
+//   - `Hold`: the byte may belong to a candidate OSC sequence — append it to a
+//     pending buffer until the sequence completes or turns out not to be OSC.
+//
+// On transitions where a held candidate turns out to be something else (e.g.
+// `ESC [` is a CSI, not OSC), the parser sets `flush_pending` so the relay
+// drains its pending buffer before handling the current byte. When an OSC
+// sequence completes, the parser emits an [`OscCompletion`] carrying the title
+// (for codes 0/1/2) or `None` (other codes / overflow). The relay then decides
+// whether to drop or flush the pending sequence and whether to record the title.
 
 const TITLE_CAP: usize = 4096;
+
+const ESC: u8 = 0x1b;
+const BEL: u8 = 0x07;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -9,6 +27,54 @@ enum State {
     OscParam,
     OscData,
     OscEsc,
+}
+
+/// What the relay should do with the byte just consumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ByteAction {
+    /// Write the byte straight to the output.
+    Emit,
+    /// Append the byte to the pending buffer; it may belong to a sequence
+    /// under inspection.
+    Hold,
+}
+
+/// Signaled when the byte just consumed terminated an OSC sequence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OscCompletion {
+    /// The captured title for OSC codes 0/1/2; `None` for other codes or when
+    /// the data buffer overflowed and the title could not be captured.
+    pub title: Option<String>,
+}
+
+/// Result of feeding one byte to the observer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ByteStep {
+    /// If set, the relay should flush its pending buffer to the output before
+    /// handling this byte — the buffered bytes are not a filterable sequence.
+    pub flush_pending: bool,
+    /// What to do with the byte just consumed.
+    pub byte: ByteAction,
+    /// Set when this byte completed an OSC sequence (it is the terminator).
+    pub completed: Option<OscCompletion>,
+}
+
+impl ByteStep {
+    fn emit() -> Self {
+        Self {
+            flush_pending: false,
+            byte: ByteAction::Emit,
+            completed: None,
+        }
+    }
+
+    fn hold() -> Self {
+        Self {
+            flush_pending: false,
+            byte: ByteAction::Hold,
+            completed: None,
+        }
+    }
 }
 
 pub struct TitleObserver {
@@ -30,58 +96,106 @@ impl TitleObserver {
         }
     }
 
-    pub fn advance(&mut self, byte: u8) -> Option<String> {
+    pub fn advance(&mut self, byte: u8) -> ByteStep {
         match self.state {
             State::Ground => {
-                if byte == 0x1b {
+                if byte == ESC {
                     self.state = State::Esc;
+                    ByteStep::hold()
+                } else {
+                    ByteStep::emit()
                 }
-                None
             }
             State::Esc => {
                 if byte == b']' {
                     self.osc_param.clear();
                     self.osc_data.clear();
+                    self.osc_overflowed = false;
                     self.state = State::OscParam;
+                    ByteStep::hold()
                 } else {
-                    self.state = State::Ground;
+                    // Not an OSC start. Flush the held ESC and re-evaluate this
+                    // byte: if it is itself an ESC, begin a fresh candidate.
+                    self.reset();
+                    if byte == ESC {
+                        self.state = State::Esc;
+                        ByteStep {
+                            flush_pending: true,
+                            byte: ByteAction::Hold,
+                            completed: None,
+                        }
+                    } else {
+                        ByteStep {
+                            flush_pending: true,
+                            byte: ByteAction::Emit,
+                            completed: None,
+                        }
+                    }
                 }
-                None
             }
             State::OscParam => {
                 if byte == b';' {
                     self.state = State::OscData;
-                } else if byte == 0x1b || byte == 0x07 {
-                    self.reset();
+                    ByteStep::hold()
                 } else if byte.is_ascii_digit() {
                     self.osc_param.push(byte);
+                    ByteStep::hold()
                 } else {
-                    self.reset();
+                    self.abort_to_ground(byte)
                 }
-                None
             }
-            State::OscData => match byte {
-                0x07 => self.finish_osc(),
-                0x1b => {
+            State::OscData => {
+                if byte == BEL {
+                    let title = self.finish_osc();
+                    ByteStep {
+                        flush_pending: false,
+                        byte: ByteAction::Hold,
+                        completed: Some(OscCompletion { title }),
+                    }
+                } else if byte == ESC {
                     self.state = State::OscEsc;
-                    None
-                }
-                _ => {
+                    ByteStep::hold()
+                } else {
                     if self.osc_data.len() < TITLE_CAP {
                         self.osc_data.push(byte);
                     } else {
                         self.osc_overflowed = true;
                     }
-                    None
+                    ByteStep::hold()
                 }
-            },
+            }
             State::OscEsc => {
                 if byte == b'\\' {
-                    self.finish_osc()
+                    let title = self.finish_osc();
+                    ByteStep {
+                        flush_pending: false,
+                        byte: ByteAction::Hold,
+                        completed: Some(OscCompletion { title }),
+                    }
                 } else {
-                    self.reset();
-                    None
+                    self.abort_to_ground(byte)
                 }
+            }
+        }
+    }
+
+    /// The held candidate was not a complete OSC title sequence: drop parser
+    /// state to Ground, flush the pending buffer, and re-evaluate `byte` (an
+    /// ESC starts a fresh candidate, anything else is emitted).
+    fn abort_to_ground(&mut self, byte: u8) -> ByteStep {
+        self.reset();
+        if byte == ESC {
+            self.state = State::Esc;
+            ByteStep {
+                flush_pending: true,
+                byte: ByteAction::Hold,
+                completed: None,
+            }
+        } else {
+            ByteStep {
+                flush_pending: true,
+                byte: ByteAction::Emit,
+                completed: None,
             }
         }
     }
@@ -111,6 +225,13 @@ impl TitleObserver {
         self.osc_overflowed = false;
     }
 
+    /// Safety valve for a candidate sequence that never terminates: force the
+    /// parser back to Ground so the relay can flush its pending buffer and bound
+    /// memory. Only meaningful if the caller is holding bytes.
+    pub fn force_reset(&mut self) {
+        self.reset();
+    }
+
     #[allow(dead_code)]
     pub fn current_title(&self) -> Option<&str> {
         self.current_title.as_deref()
@@ -127,8 +248,29 @@ impl Default for TitleObserver {
 mod tests {
     use super::*;
 
+    /// Drive the observer over `bytes`, collecting completed titles and the
+    /// emitted output stream (held bytes are emitted on flush / completion so
+    /// the result mirrors what a non-stripping relay would write).
     fn advance_bytes(observer: &mut TitleObserver, bytes: &[u8]) -> Vec<String> {
-        bytes.iter().filter_map(|&b| observer.advance(b)).collect()
+        let mut titles = Vec::new();
+        let mut pending: Vec<u8> = Vec::new();
+        for &b in bytes {
+            let step = observer.advance(b);
+            if step.flush_pending {
+                pending.clear();
+            }
+            match step.byte {
+                ByteAction::Emit => {}
+                ByteAction::Hold => pending.push(b),
+            }
+            if let Some(completion) = step.completed {
+                pending.clear();
+                if let Some(title) = completion.title {
+                    titles.push(title);
+                }
+            }
+        }
+        titles
     }
 
     #[test]
@@ -178,9 +320,21 @@ mod tests {
         let mut obs = TitleObserver::new();
         let bytes = b"\x1b]2;split-title\x07";
         let mut titles = Vec::new();
+        let mut pending: Vec<u8> = Vec::new();
         for &b in bytes {
-            if let Some(t) = obs.advance(b) {
-                titles.push(t);
+            let step = obs.advance(b);
+            if step.flush_pending {
+                pending.clear();
+            }
+            match step.byte {
+                ByteAction::Emit => {}
+                ByteAction::Hold => pending.push(b),
+            }
+            if let Some(completion) = step.completed {
+                pending.clear();
+                if let Some(title) = completion.title {
+                    titles.push(title);
+                }
             }
         }
         assert_eq!(titles, vec!["split-title".to_string()]);
@@ -209,5 +363,60 @@ mod tests {
         let mut obs = TitleObserver::new();
         let titles = advance_bytes(&mut obs, b"\x1b]2;test\x1b\\");
         assert_eq!(titles, vec!["test".to_string()]);
+    }
+
+    /// A relay that reproduces the stream so we can assert byte dispositions.
+    fn relay_stream(observer: &mut TitleObserver, bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut pending: Vec<u8> = Vec::new();
+        for &b in bytes {
+            let step = observer.advance(b);
+            if step.flush_pending {
+                out.extend_from_slice(&pending);
+                pending.clear();
+            }
+            match step.byte {
+                ByteAction::Emit => out.push(b),
+                ByteAction::Hold => pending.push(b),
+            }
+            if let Some(completion) = step.completed {
+                // Non-stripping relay: always flush.
+                let _ = completion;
+                out.extend_from_slice(&pending);
+                pending.clear();
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn non_osc_escape_passes_through() {
+        let mut obs = TitleObserver::new();
+        // CSI sequence should round-trip byte-for-byte.
+        let stream = relay_stream(&mut obs, b"\x1b[31mhi");
+        assert_eq!(stream, b"\x1b[31mhi");
+    }
+
+    #[test]
+    fn plain_text_passes_through() {
+        let mut obs = TitleObserver::new();
+        let stream = relay_stream(&mut obs, b"hello world");
+        assert_eq!(stream, b"hello world");
+    }
+
+    #[test]
+    fn osc_sequence_round_trips_when_not_stripped() {
+        let mut obs = TitleObserver::new();
+        let stream = relay_stream(&mut obs, b"beep\x1b]2;t\x07boop");
+        assert_eq!(stream, b"beep\x1b]2;t\x07boop");
+    }
+
+    #[test]
+    fn esc_then_osc_passes_both() {
+        let mut obs = TitleObserver::new();
+        // A stray ESC immediately followed by an OSC: the lone ESC is flushed,
+        // then the OSC is processed normally.
+        let stream = relay_stream(&mut obs, b"\x1b\x1b]2;t\x07");
+        assert_eq!(stream, b"\x1b\x1b]2;t\x07");
     }
 }
