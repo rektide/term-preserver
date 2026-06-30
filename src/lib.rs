@@ -20,9 +20,8 @@
 //!   actions, gated behind the default-on `regex` Cargo feature.
 //! - [`prompt`] — pure formatting: the retry prompt, OSC re-emit
 //!   reconstruction, and the visible "gone" line.
-//! - [`tmux`] — samples the local tmux server (by client PID) into a
-//!   thread-shared [`tmux::TmuxState`] so the session id and inner command
-//!   survive child exit.
+//! - [`tmux`] — the tmux slot (`TmuxSample`/`TmuxState`) plus, behind the
+//!   `tmux` feature, a sampler that polls the local tmux server by client PID.
 //! - [`proxy`] — the [`proxy::RetryLoop`] orchestrator tying it together.
 
 pub mod color;

@@ -10,20 +10,30 @@
 //!
 //! Parsing is split from I/O: the `parse_*` / `find_*` functions are pure and
 //! unit-tested; only the `query_*` / `sample_once` / [`TmuxSampler`] shell out.
+//!
+//! ## Feature gating
+//!
+//! The sourcing machinery (subprocess queries, the sampler thread) lives behind
+//! the `tmux` Cargo feature. The slot types — [`TmuxSample`], [`TmuxPaneInfo`],
+//! [`TmuxState`] — are always present so the rest of the system (the `tmux`
+//! field on `SessionExit`, the formatters) is identical either way. With the
+//! feature off, [`TmuxSampler::start`] is a no-op stub: no thread, no `tmux`
+//! subprocess, and the slot stays empty. The slot is source-agnostic by design,
+//! so additional sources (control mode, exit-time query) can write to
+//! [`TmuxState`] and be toggled independently.
 
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::thread::JoinHandle;
 
 use crate::launch::TmuxMode;
 
-/// How often the sampler refreshes a sample.
-const SAMPLE_INTERVAL: Duration = Duration::from_secs(20);
-/// Poll granularity while sleeping between samples, so the sampler notices a
-/// dead child promptly instead of blocking for the whole interval.
-const POLL_TICK: Duration = Duration::from_millis(100);
+#[cfg(feature = "tmux")]
+use std::process::Command;
+#[cfg(feature = "tmux")]
+use std::thread;
+#[cfg(feature = "tmux")]
+use std::time::Duration;
 
 /// One pane's introspected state, as reported by `tmux list-panes`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -125,10 +135,19 @@ pub fn parse_pane_line(line: &str) -> Option<TmuxPaneInfo> {
     })
 }
 
-// --- subprocess queries -------------------------------------------------
+// --- subprocess queries (behind the `tmux` feature) ---------------------
+
+/// How often the sampler refreshes a sample.
+#[cfg(feature = "tmux")]
+const SAMPLE_INTERVAL: Duration = Duration::from_secs(20);
+/// Poll granularity while sleeping between samples, so the sampler notices a
+/// dead child promptly instead of blocking for the whole interval.
+#[cfg(feature = "tmux")]
+const POLL_TICK: Duration = Duration::from_millis(100);
 
 /// Run `tmux <args>` and return its stdout as text, or `None` if tmux is absent
 /// or reports failure (e.g. no server / no sessions).
+#[cfg(feature = "tmux")]
 fn tmux_output(args: &[&str]) -> Option<String> {
     let output = Command::new("tmux").args(args).output().ok()?;
     if !output.status.success() {
@@ -139,6 +158,7 @@ fn tmux_output(args: &[&str]) -> Option<String> {
 
 /// Authoritative correlation: the spawned child is a tmux client, so match its
 /// PID against `#{client_pid}`. Only valid while the client is attached.
+#[cfg(feature = "tmux")]
 fn query_session_for_pid(child_pid: u32) -> Option<(String, String)> {
     let text = tmux_output(&[
         "list-clients",
@@ -150,6 +170,7 @@ fn query_session_for_pid(child_pid: u32) -> Option<(String, String)> {
 
 /// Fallback correlation by the session name we asked for (`--tmux`). Weaker:
 /// tmux may auto-rename or host a duplicate name.
+#[cfg(feature = "tmux")]
 fn query_session_by_name(name: &str) -> Option<(String, String)> {
     let text = tmux_output(&["list-sessions", "-F", "#{session_name}\t#{session_id}"])?;
     for line in text.lines() {
@@ -163,6 +184,7 @@ fn query_session_by_name(name: &str) -> Option<(String, String)> {
 }
 
 /// Per-pane introspection for a session: window, pane, and the inner command.
+#[cfg(feature = "tmux")]
 fn query_panes(session_id: &str) -> Vec<TmuxPaneInfo> {
     let format = "\
 #{window_index}\t\
@@ -179,6 +201,7 @@ fn query_panes(session_id: &str) -> Vec<TmuxPaneInfo> {
 
 /// Read one full sample ("read"): correlate by PID, fall back to the requested
 /// name, then list panes. Returns `None` if the session can't be found.
+#[cfg(feature = "tmux")]
 pub fn sample_once(child_pid: u32, fallback_name: Option<&str>) -> Option<TmuxSample> {
     let (session_id, session_name) = query_session_for_pid(child_pid)
         .or_else(|| fallback_name.and_then(query_session_by_name))?;
@@ -193,12 +216,20 @@ pub fn sample_once(child_pid: u32, fallback_name: Option<&str>) -> Option<TmuxSa
 /// Owner of the sampler thread. Started by `ChildSession` when a local tmux
 /// target is active; stopped on child exit so the cached last sample can be
 /// snapshotted. Modelled on `ResizeForwarder`.
+///
+/// Under the `tmux` feature this spawns the polling thread; without it, [`start`]
+/// is a no-op stub (no thread, no subprocess) and the slot stays empty.
+///
+/// [`start`]: TmuxSampler::start
 pub struct TmuxSampler {
-    child_alive: Arc<AtomicBool>,
-    handle: JoinHandle<()>,
+    /// `Some` only when a real thread was spawned.
+    child_alive: Option<Arc<AtomicBool>>,
+    handle: Option<JoinHandle<()>>,
 }
 
 impl TmuxSampler {
+    /// Start the polling sampler against the local tmux server.
+    #[cfg(feature = "tmux")]
     pub fn start(
         child_pid: u32,
         target: TmuxMode,
@@ -222,14 +253,32 @@ impl TmuxSampler {
             }
         });
         Self {
-            child_alive,
-            handle,
+            child_alive: Some(child_alive),
+            handle: Some(handle),
+        }
+    }
+
+    /// Feature-off stub: no thread, no subprocess. Keeps the slot machinery and
+    /// call sites identical so `ChildSession` is feature-agnostic.
+    #[cfg(not(feature = "tmux"))]
+    #[allow(unused_variables)]
+    pub fn start(
+        child_pid: u32,
+        target: TmuxMode,
+        child_alive: Arc<AtomicBool>,
+        state: TmuxState,
+    ) -> Self {
+        Self {
+            child_alive: None,
+            handle: None,
         }
     }
 
     pub fn stop(self) {
-        self.child_alive.store(false, Ordering::Relaxed);
-        let _ = self.handle.join();
+        if let (Some(alive), Some(handle)) = (self.child_alive, self.handle) {
+            alive.store(false, Ordering::Relaxed);
+            let _ = handle.join();
+        }
     }
 }
 

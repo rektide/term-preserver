@@ -1,5 +1,8 @@
 //! Integration tests for the tmux sampler against a real local tmux server.
 //! Gated on `tmux` being installed; both tests early-return (pass) otherwise.
+//! Compiled only with the `tmux` feature, which provides the sourcing API.
+
+#![cfg(feature = "tmux")]
 
 use std::process::Command as StdCommand;
 use std::sync::atomic::{AtomicBool, Ordering};
