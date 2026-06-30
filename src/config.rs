@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::filter::TitleFilterRule;
 use crate::launch::LaunchConfig;
+use crate::tmux::TmuxConfig;
 
 /// Resolved configuration for the proxy, merged from defaults, TOML, env, and
 /// CLI (in increasing precedence) by figment2.
@@ -40,6 +41,9 @@ pub struct Config {
 
     #[serde(default)]
     pub launch: LaunchConfig,
+
+    #[serde(default)]
+    pub tmux: TmuxConfig,
 }
 
 fn default_command() -> Vec<String> {
@@ -84,6 +88,7 @@ impl Default for Config {
             print_gone_title: default_print_gone_title(),
             title_filters: Vec::new(),
             launch: LaunchConfig::default(),
+            tmux: TmuxConfig::default(),
         }
     }
 }
@@ -254,6 +259,7 @@ pub fn load_config(cli_args: CliArgs) -> eyre::Result<Config> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tmux::TmuxSource;
     use serial_test::serial;
     use tempfile::NamedTempFile;
 
@@ -388,5 +394,36 @@ command = ["/bin/from-file"]
         let cli = make_cli(&["--config", "/dev/null", "--ssh", "w"]);
         let config = load_config(cli).unwrap();
         assert!(config.launch.is_active());
+    }
+
+    // --- tmux sources config ---
+
+    #[test]
+    fn default_tmux_sources_is_poll() {
+        let config = Config::default();
+        assert_eq!(config.tmux.sources, vec![TmuxSource::Poll]);
+        assert!(config.tmux.enabled(TmuxSource::Poll));
+    }
+
+    #[test]
+    fn tmux_sources_disabled_from_toml() {
+        let mut tmp = NamedTempFile::new().unwrap();
+        use std::io::Write;
+        tmp.write_all(b"[tmux]\nsources = []\n").unwrap();
+        let cli = make_cli(&["--config", tmp.path().to_str().unwrap()]);
+        let config = load_config(cli).unwrap();
+        assert!(config.tmux.sources.is_empty());
+        assert!(!config.tmux.enabled(TmuxSource::Poll));
+    }
+
+    #[test]
+    fn tmux_sources_unknown_variant_errors() {
+        // `control` / `exit` are planned but not yet variants, so they are
+        // rejected today; flip this test when each source lands.
+        let mut tmp = NamedTempFile::new().unwrap();
+        use std::io::Write;
+        tmp.write_all(b"[tmux]\nsources = [\"control\"]\n").unwrap();
+        let cli = make_cli(&["--config", tmp.path().to_str().unwrap()]);
+        assert!(load_config(cli).is_err());
     }
 }

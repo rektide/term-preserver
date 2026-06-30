@@ -16,7 +16,7 @@ use crate::launch::LaunchContext;
 use crate::osc::{ByteAction, OscCapture, TitleObserver};
 use crate::runtime::{ActiveSessionGuard, ProxyRuntime};
 use crate::terminal;
-use crate::tmux::{TmuxSample, TmuxSampler, TmuxState};
+use crate::tmux::{TmuxConfig, TmuxSample, TmuxSampler, TmuxSource, TmuxState};
 
 const BUF_SIZE: usize = 8192;
 /// Upper bound on a buffered candidate OSC sequence. If a sequence never
@@ -498,6 +498,7 @@ impl ChildSession {
         runtime: &ProxyRuntime,
         filters: Arc<FilterSet>,
         launch_ctx: LaunchContext,
+        tmux_cfg: TmuxConfig,
     ) -> eyre::Result<Self> {
         let (pty, pts) = pty_process::blocking::open().wrap_err("opening PTY")?;
 
@@ -533,9 +534,10 @@ impl ChildSession {
 
         // Only a local tmux server is reachable by the local `tmux` binary, so
         // the sampler runs exclusively for local tmux targets. It correlates the
-        // spawned client to its session by PID and caches the last sample.
+        // spawned client to its session by PID and caches the last sample. The
+        // poll source must also be selected in `[tmux] sources` (default on).
         let (tmux_state, tmux_sampler) = match launch_ctx.local_tmux_target() {
-            Some(target) => {
+            Some(target) if tmux_cfg.enabled(TmuxSource::Poll) => {
                 let state = TmuxState::new();
                 let sampler = TmuxSampler::start(
                     child_pid,
@@ -545,7 +547,7 @@ impl ChildSession {
                 );
                 (Some(state), Some(sampler))
             }
-            None => (None, None),
+            _ => (None, None),
         };
 
         Ok(Self {
@@ -591,8 +593,9 @@ impl ChildSession {
         runtime: &ProxyRuntime,
         filters: Arc<FilterSet>,
         launch_ctx: LaunchContext,
+        tmux_cfg: TmuxConfig,
     ) -> eyre::Result<SessionExit> {
-        Self::spawn(command, runtime, filters, launch_ctx)?.wait()
+        Self::spawn(command, runtime, filters, launch_ctx, tmux_cfg)?.wait()
     }
 }
 

@@ -13,6 +13,7 @@ use crate::prompt::{self, PromptDecision, PromptPolicy};
 use crate::runtime::{ProxyEvent, ProxyRuntime};
 use crate::session::{ChildSession, CommandSpec, SessionExit};
 use crate::signals::SignalPolicy;
+use crate::tmux::TmuxConfig;
 enum PromptInput {
     Key(u8),
     Timeout,
@@ -26,6 +27,7 @@ pub struct RetryLoop {
     print_gone_title: bool,
     filters: Arc<FilterSet>,
     launch_ctx: LaunchContext,
+    tmux: TmuxConfig,
 }
 
 impl RetryLoop {
@@ -35,6 +37,7 @@ impl RetryLoop {
         print_gone_title: bool,
         filters: Arc<FilterSet>,
         launch_ctx: LaunchContext,
+        tmux: TmuxConfig,
     ) -> Self {
         Self {
             command,
@@ -43,6 +46,7 @@ impl RetryLoop {
             print_gone_title,
             filters,
             launch_ctx,
+            tmux,
         }
     }
 
@@ -57,6 +61,7 @@ impl RetryLoop {
                 runtime,
                 self.filters.clone(),
                 self.launch_ctx.clone(),
+                self.tmux.clone(),
             )?;
             runtime.record_event(ProxyEvent::ChildExited(Box::new(SessionExit {
                 command: exit.command.clone(),
@@ -149,6 +154,7 @@ fn read_prompt_input(runtime: &mut ProxyRuntime) -> eyre::Result<PromptInput> {
 
 pub fn run(config: Config) -> eyre::Result<i32> {
     let launch_ctx = config.launch.context();
+    let tmux = config.tmux.clone();
     let command = if config.launch.is_active() {
         let env_shell = std::env::var("SHELL").ok();
         config
@@ -168,6 +174,7 @@ pub fn run(config: Config) -> eyre::Result<i32> {
         config.print_gone_title,
         filters,
         launch_ctx,
+        tmux,
     );
     retry_loop.run(&mut runtime)
 }

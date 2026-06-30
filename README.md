@@ -236,8 +236,9 @@ Config loads via [figment2](https://docs.rs/figment2) with precedence:
 | `--shell` / `--ssh` / `--mosh` / `--tmux*` / `--dir` / `--no-login` / `--no-interactive` | [Session launcher](#session-launcher) | _none_ |
 | `-- <command…>` | Child command (trailing args) | `$SHELL` |
 
-`title_filters` is configured via the config file (TOML) or environment only —
-see [Title filtering](#title-filtering).
+`title_filters` and `[tmux] sources` are configured via the config file (TOML)
+or environment only — see [Title filtering](#title-filtering) and
+[tmux introspection](#tmux-introspection).
 
 ### Config file
 
@@ -262,7 +263,29 @@ tmux = "compfuzor"
 dir = "~/src/foo"
 login = true
 interactive = true
+
+[tmux]
+sources = ["poll"]
 ```
+
+### tmux introspection
+
+When the proxy launches a *local* tmux session (any `--tmux*` flag with no
+`--ssh`/`--mosh` transport), it can track the live session and surface its id
+on child exit. `[tmux] sources` selects which sources may fill the tmux slot,
+so they can be turned on and off independently:
+
+| Source | Effect | Status |
+|--------|--------|--------|
+| `poll` | Poll the local tmux server every ~20s, correlate by client PID, cache the last sample | implemented |
+| `control` | tmux control mode (`tmux -C`) for reactive updates | planned |
+| `exit` | One-shot query at child exit | planned (server may be gone) |
+
+Default is `["poll"]`; set `sources = []` to disable all tmux introspection at
+runtime. This is independent of the `tmux` Cargo feature, which gates the
+sourcing code itself: with the feature off the config is still accepted but
+every source is inert (no thread, no `tmux` subprocess). Unknown source names
+are rejected at config load.
 
 ### Environment variables
 
@@ -274,6 +297,7 @@ JSON-encoded where applicable:
     TERM_PRESERVER_LAUNCH__MOSH=w
     TERM_PRESERVER_LAUNCH__TMUX=compfuzor
     TERM_PRESERVER_LAUNCH__LOGIN=false
+    TERM_PRESERVER_TMUX__SOURCES='["poll"]'
 
 ## Architecture
 

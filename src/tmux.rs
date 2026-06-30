@@ -26,6 +26,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+use serde::{Deserialize, Serialize};
+
 use crate::launch::TmuxMode;
 
 #[cfg(feature = "tmux")]
@@ -34,6 +36,49 @@ use std::process::Command;
 use std::thread;
 #[cfg(feature = "tmux")]
 use std::time::Duration;
+
+// --- configuration ------------------------------------------------------
+
+/// A source that may fill the tmux slot. Currently only the poll sampler is
+/// implemented; `control` (tmux control mode) and `exit` (exit-time query) are
+/// planned — add them as variants here as each lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TmuxSource {
+    Poll,
+}
+
+/// tmux introspection configuration.
+///
+/// `sources` selects which sources may write the tmux slot. The default
+/// `["poll"]` enables the poll sampler; set `sources = []` to disable all tmux
+/// introspection at runtime. This is independent of the `tmux` Cargo feature,
+/// which gates the sourcing *code*: with the feature off the config is still
+/// accepted but every source is inert (no thread, no subprocess).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TmuxConfig {
+    #[serde(default = "default_tmux_sources")]
+    pub sources: Vec<TmuxSource>,
+}
+
+fn default_tmux_sources() -> Vec<TmuxSource> {
+    vec![TmuxSource::Poll]
+}
+
+impl Default for TmuxConfig {
+    fn default() -> Self {
+        Self {
+            sources: default_tmux_sources(),
+        }
+    }
+}
+
+impl TmuxConfig {
+    /// Whether `source` is selected by the current configuration.
+    pub fn enabled(&self, source: TmuxSource) -> bool {
+        self.sources.contains(&source)
+    }
+}
 
 /// One pane's introspected state, as reported by `tmux list-panes`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
