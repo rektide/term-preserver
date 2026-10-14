@@ -8,10 +8,38 @@ author: model:openai/gpt-6-astra
 date: 2026-10-14
 sources:
   - resource: "opencode://ses_ec84404aaffeHUijDXZqczAc1F"
-    title: "Commissioned FX/G research, developed the shell design including human-selected OSC 7501 replies, and handed collection requirements to Kopacetic"
+    title: "Commissioned protocol/backend designs, selected capability replies and short-lived writers with the user, and established capability-oriented tracking and collection tickets"
+extensions:
+  ticket: tipre-tracking
+  related_work: [kop-collections]
 ---
 
 # Shell and terminal-state tracking
+
+## Capability work anchors
+
+Epic **`tipre-tracking`** connects the existing title/icon/color observer and
+launcher to the following prospective capabilities. Ticket design pointers are
+research inputs, not acceptance of every proposed detail.
+
+| Ticket | Capability |
+| --- | --- |
+| `tipre-tracking-progress` | Retain OSC 9;4 progress independently of titles |
+| `tipre-tracking-program-status` | Parse and retain OSC 7501 record trees |
+| `tipre-tracking-status-lifetimes` | Apply prompt, reset and exit transitions |
+| `tipre-tracking-status-responder` | Advertise support with one ordered proxy-owned reply |
+| `tipre-tracking-one-shot` | Exit with the child instead of prompting for retry |
+| `tipre-tracking-shell-entry` | Shell-compatible entry with explicit inner zsh |
+| `tipre-tracking-entity` | Stable per-shell identity and backend-portable state |
+| `tipre-tracking-publication` | Bounded off-relay publication through short-lived writers |
+| `tipre-tracking-tmux-progress` | Per-pane sampled progress with explicit source scope |
+| `tipre-tracking-passthrough` | Observe explicit tmux DCS-wrapped reports |
+| `tipre-tracking-lightness` | Measure and optimize many-instance footprint |
+
+Existing capability anchors remain native: `tipre-keep-icon-osc`,
+`tipre-keep-color-osc`, and the completed `tipre-launcher` family. Attachment/title
+policy remains `tipre-session-engine`; control-mode freshness remains
+`tipre-tmux-control-mode`. New work links these rather than replacing them.
 
 ## Integration direction
 
@@ -36,6 +64,10 @@ sources:
 - [Caminus collection assessment](caminus-collections.glm53fx.md) — FX trace of
   keyed directory isolation, actual legacy write behavior, and process-level
   qualification gaps; separates unwired atomic helpers from the live serializer.
+- [Turso process/handle ownership assessment](turso-multiprocess.glm53m.md) — G
+  pinned-driver source trace and isolated OS-process experiments. The user's
+  intended shape is short-lived open/write/close publications; this is distinct
+  from every proxy retaining an open database.
 
 ## Earlier foundations
 

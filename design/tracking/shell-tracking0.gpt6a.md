@@ -45,6 +45,9 @@ sources:
     title: Reviewed collection and live-write-path assessment
 verification:
   method: Source inspection; proposed behavior is not implemented or runtime-tested
+extensions:
+  ticket: tipre-tracking
+  related_work: [kop-collections]
 ---
 
 # Shell-local tracking with Kopacetic entities
@@ -60,6 +63,11 @@ policy over the same PTY machinery.
 The user selected **research and design first**. CLI names and schema below are
 proposals. Historical storage and historical views belong to Kopacetic; the proxy
 produces meaningful state updates and process-lifecycle facts.
+
+Epic **`tipre-tracking`** now owns this capability surface, with explicit children
+listed in the [research index](README.md#capability-work-anchors). The user also
+commissioned tickets: linking this proposed design is not blanket acceptance of
+its implementation choices. `kop-collections` owns the reusable storage handoff.
 
 ## Verified starting point
 
@@ -230,6 +238,14 @@ updates in stream order and publish accepted state, independently of presentatio
 filtering. For titles, keep the existing `ignore` semantics explicit. Storage I/O
 belongs on a worker, outside the relay and outside the observed-state mutex.
 
+**Human-selected storage lifetime:** writers are short-lived. The worker opens
+the selected store for a publication, writes, and releases its connections and
+file handles rather than keeping a database open for the shell's whole lifetime.
+Worker/process lifetime and store-handle lifetime are separate. For a shared
+Turso file this allows writers to take turns; overlapping opens still need bounded
+contention handling and exact handle-release qualification. Do not infer a need
+for a permanent database service from the long-held-handle failure alone.
+
 For a latest-state contract, a bounded dirty-state handoff can coalesce updates
 while a write is in progress. The worker then publishes the newest complete state.
 Record an observation sequence and timestamps so readers can identify recency.
@@ -263,9 +279,12 @@ Use the same `EntityIdentity` and faceted payload for backend adapters. Existing
 stores have similar `put` operations but different sync/async APIs, return types,
 and guarantees; there is no universal store trait in the inspected core. Keep a
 narrow publisher boundary in term-preserver and develop shared collection/write
-contracts in Kopacetic. Before choosing shared-file Turso writes, establish its
-pinned driver's actual **cross-process** ownership contract; distinct entity keys
-alone do not prove concurrent database-file safety.
+contracts in Kopacetic. G's pinned-driver probe confirmed that a second process's
+default Turso open fails while the first keeps the database open. The requested
+short-lived writer topology must instead qualify close/reopen handoff and
+overlapping-open retries; distinct keys alone do not remove that coordination.
+See [Turso assessment](turso-multiprocess.glm53m.md) and
+`kop-collections-turso-writers` for that evolving evidence.
 
 Caminus already has an identity-addressed collection root, not just one value
 tree. The [reviewed collection assessment](caminus-collections.glm53fx.md) finds
