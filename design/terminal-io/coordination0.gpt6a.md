@@ -95,6 +95,10 @@ is not proof of ownership.
 - Unsupported requests return unknown/unsupported, not a cached value labeled
   as a fresh terminal response. No color reply is synthesized from recorded state.
 
+Label a queried result by its upstream terminal scope and observation time. With
+tmux or another intermediary, a response can describe that responding layer;
+it is not universal proof of the final physical terminal's configuration.
+
 Capability answering is protocol-specific. Recording OSC 7501 is the selected
 service being advertised; recording notification requests does not imply an OS
 notification-delivery service or authoritative knowledge of the terminal's live
