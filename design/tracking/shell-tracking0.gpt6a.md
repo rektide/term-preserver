@@ -121,9 +121,13 @@ shell entry is an executable path, not a place to append `--mode` arguments.
 5. Use shell-appropriate shutdown handling rather than falling into reconnect
    behavior. Verify hangup/termination, resize, foreground job control, and drain
    ordering against a real outer PTY.
-6. Set the child's `$SHELL` to the real inner shell as the proposed default, so
-   ordinary nested shell launches do not accidentally wrap themselves. Explicit
-   nested proxy launches may create their own entities with a parent link.
+6. Keep the public shell choice and inner executable separate. Prefer preserving
+   `$SHELL` as the configured tracking entry point: programs opening another shell
+   should retain the user's selected wrapper. The wrapper itself always selects
+   the independently configured zsh path. A nested proxy allocates a fresh entity
+   and may link to the inherited parent shell ID; it must not reuse that parent's
+   key. Setting `$SHELL` to zsh would instead opt ordinary `$SHELL` callers out of
+   tracking, so it is an explicit alternative rather than the default.
 
 There is a second existing resolution trap: `Config.command` defaults to
 `[$SHELL]`, then an active launcher can treat that default as an explicit inner
