@@ -1,14 +1,14 @@
 ---
 type: Assessment
 title: "Kopacetic EntityIdentity and kopacetic-caminus collections: multiprocess shared-root assessment"
-description: "Source-verified assessment of kopacetic-core EntityIdentity and the kopacetic-caminus CaminusStore collection: different-identity vs same-identity multiprocess writes on a shared root, enumeration/discovery gaps, identity collision and path handling, existing tests; distinguishes implemented capability from missing concept/API and proposes narrowly scoped Kopacetic handoff work. Context: term-preserver write-side persistence of per-shell state (Caminus prime interest, 9p future, Turso useful)."
+description: "Source-verified assessment of kopacetic-core EntityIdentity and the kopacetic-caminus CaminusStore collection: the LIVE write call chain (std::fs::write legacy layout, rooted v1 mutation unwired), different-identity vs same-identity multiprocess qualification on a shared root, enumeration/discovery gaps, identity collision and path handling, existing tests; distinguishes implemented capability from missing concept/API and proposes narrowly scoped Kopacetic handoff work. Context: term-preserver write-side persistence of per-shell state (Caminus prime interest, 9p future, Turso useful). Rev 3: live-chain correction, multiprocess qualification, handoff rescoping."
 resource: /home/rektide/src/term-preserver/design/tracking/caminus-collections.glm53fx.md
 status: draft
 author: model:zai-coding-plan/glm-5.3-flash#max (subagent, petname nimble-panda)
 date: 2026-10-14
 sources:
   - resource: "opencode://ses_ec843ae4bffeC3iIfhQaSKCCM9"
-    title: "FX assessment of Kopacetic EntityIdentity and kopacetic-caminus collections under shared-root multiprocess writes, with handoff scoping for term-preserver shell-state persistence"
+    title: "FX assessment of Kopacetic EntityIdentity and kopacetic-caminus collections under shared-root multiprocess writes; rev 3: traced live write chain (legacy std::fs layout, rooted v1 unwired), qualified multiprocess independence, rescoped handoff (equality law, write-first, process-pair tests)"
   - resource: "/home/rektide/src/kopacetic (5090da3, 2026-10-12)"
     title: "kopacetic-core domain/mod.rs; kopacetic-caminus src/lib.rs, tests/store.rs, README; kopacetic-turso storage/{schema,connection,transaction}.rs"
   - resource: "/home/rektide/src/facet-caminus (9671917, 2026-09-22)"
@@ -74,43 +74,77 @@ race-benign by design — `DirectoryNotEmpty`/`NotFound` stop the walk
 is rejected before put/get/delete (lib.rs:230-237; test store.rs:153-170,
 asserting the symlink target survives).
 
-**Different identities, shared root, multiple processes:** safe by
-construction. Each identity owns a disjoint tree; writers of different
-identities never touch the same files. The only shared mutation is the
-parent-prefix removal in `delete`, and that path already treats concurrent
-interference as benign (lib.rs:163-173). Isolation across identities under
-one root is directly tested (store.rs:83-99, 128-136).
+**Different identities, shared root, multiple processes:** disjoint
+addresses, source-inferred independence — **no multiprocess test exists**, so
+this is inference from the codec, not a demonstrated guarantee. Each identity
+owns a disjoint `data` tree; writers of different identities never write the
+same file. Residual shared couplings to qualify:
 
-**Same identity, multiple processes:** per-*file* atomic, per-*entity* not.
+- *Shared prefix directories:* identities whose encodings agree on leading
+  60-byte chunks share `v1/<chunk…>` parents. Concurrent `create_dir_all`
+  during put (serializer.rs:141–146) versus prefix pruning during another
+  identity's delete (kopacetic-caminus lib.rs:157–177) can interleave; the
+  prune itself stops benignly on `DirectoryNotEmpty`/`NotFound`, but a
+  racing rmdir between a writer's directory creation and file write surfaces
+  as a spurious `ENOENT` on that write.
+- *VCS roots:* default `put`/`get` never commit (CaminusStore sets no
+  CommitMode, lib.rs:46–48, 179–188). Commits are reachable only via the
+  `entity()` escape hatch (lib.rs:96–105); `vcs::resolve` walks **up** from
+  the entity tree preferring `.jj` then `.git` (facet-caminus vcs.rs:22,
+  34–38), so commits can land in an enclosing shared repo and interleave
+  with other entities' commits.
+- *Manifests are per-entity* (`<entity data>/.caminus/manifest`,
+  facet-caminus manifest.rs:103–152), not shared across identities; they
+  carry the size+mtime caveat for out-of-band edits (manifest.rs:3–15).
+- *Optional features:* the compio worker is in-process; notify/watchman
+  watchers observe the shared tree read-only. Neither adds cross-process
+  exclusion.
 
-- Each published file is staged then moved with a single `renameat`
-  (facet-caminus mutation.rs:68-96 `replace_file`; create-once variant with
-  `RENAME_NOREPLACE` at :105-133). No torn single file.
-- But `FilesystemDeser::write` "reconcil[es] with whatever is already
-  there" in place — the store "owns every non-dot entry" and prunes stale
-  entries (facet-caminus lib.rs:106-125). There is no staging tree swap,
-  generation directory, lock, or reader snapshot; kopacetic-caminus's own
-  README says exactly this: "A value is decomposed into a plan and
-  reconciled in place… no generation directory, fsync protocol, atomic root
-  swap, reader snapshot, or recovery marker" (Limitations → "Publication is
-  not atomic or crash-durable").
-- Consequence: two processes writing the **same** identity interleave
-  per-file; a concurrent reader can observe a mixed old/new entity. This is
-  last-writer-per-*file*, not last-writer-per-entity. Contrast:
-  kopacetic-turso publishes the whole entity in one transaction — upsert
-  identity, `DELETE` + re-`INSERT` of nodes (transaction.rs:26-54) under
-  `UNIQUE (api_version, kind, namespace, name)` (schema.rs:9). Turso's
-  worry is multiprocess *connection* behavior; Caminus's is absent
-  entity-level publication atomicity.
-- Manifest cache caveat for out-of-band edits: `.caminus/manifest` skips
-  hashing when size+mtime match; an edit preserving both is invisible
-  (facet-caminus manifest.rs:3-15, "mtime-race caveat"). Nanosecond mtimes
-  make the window small; documented upstream, worth restating for shared
-  roots.
+**Same identity, multiple processes: no atomicity at any granularity on the
+live path.** The traced call chain (kopacetic-caminus lib.rs:116–123 →
+facet-caminus lib.rs:106–137 → serializer.rs):
+
+```text
+CaminusStore::put_value            kopacetic-caminus lib.rs:116-123
+  └─ FilesystemDeser::write        facet-caminus lib.rs:106-137
+       └─ FilesystemSerializer     serializer.rs:68-74 (ambient PathBuf plan)
+            └─ serialize_root      → FsInstruction queue (instruction.rs)
+            └─ finalize            serializer.rs:111-167
+                 ├─ diff_against_disk (ambient reads; manifest optional)
+                 ├─ sync:   std::fs::create_dir_all + std::fs::write
+                 │          serializer.rs:141-147
+                 ├─ compio: compio_fs::write   compio_worker.rs:90-105
+                 └─ remove: std::fs::remove_file/_dir, errors ignored
+                            serializer.rs:150-158
+```
+
+- `std::fs::write` opens with truncate and writes in place: **not even a
+  single file publishes atomically**. A concurrent reader can observe an
+  empty or partial file mid-write; two writers of the same identity
+  interleave per instruction, and a reader mid-reconcile can parse a mix or
+  fail outright.
+- The rooted temp+`renameat` machinery (path/rooted/linux/mutation.rs:68–96
+  `replace_file`, :105–133 create-once `RENAME_NOREPLACE`) **exists but is
+  not in this chain**. facet-caminus README:274–280: public `FilesystemDeser`
+  APIs "currently use the legacy physical layout"; format-v1 is "not wired
+  into serialization, parsing, watching, replay, or format selection", with
+  "separate rooted-filesystem work required before v1 can be enabled safely".
+  Matches the Kopacetic-side gate at design/path/README.md:59. My rev-2
+  claim that per-file writes atomic-rename was wrong for the live path —
+  the citation described an unwired helper.
+- kopacetic-caminus's own README agrees in substance ("A value is
+  decomposed into a plan and reconciled in place… no generation directory,
+  fsync protocol, atomic root swap, reader snapshot, or recovery marker").
+- Contrast: kopacetic-turso publishes the whole entity in one transaction —
+  upsert identity, `DELETE` + re-`INSERT` of nodes (transaction.rs:26–54)
+  under `UNIQUE (api_version, kind, namespace, name)` (schema.rs:9).
+- Manifest cache caveat for out-of-band edits: unchanged-detection skips
+  hashing when size+mtime match (manifest.rs:3–15). Single-writer-oriented;
+  another process's same-size/same-mtime rewrite is invisible to the cache.
 
 **Write-side cost per persist:** reconcile walks the entity (O(fields) reads)
 per `put`; the per-entity manifest makes unchanged files O(1)-check
-(facet-caminus lib.rs:63-71 doc). For per-shell-state persistence at exit
+(facet-caminus lib.rs:63–71 doc). For per-shell-state persistence at exit
 this is fine; frequent small updates want `with_manifest()`.
 
 ## 3. Enumeration / discovery: absent by explicit decision
@@ -152,48 +186,66 @@ layout must become a stated, versioned API first.
 | `absent_and_deleted_values_return_none` (:139-151) | get/delete semantics on absent trees; fresh-path put works |
 | `entity_root_symlink_is_rejected` (:153-170, unix) | non-directory at entity path rejected for put/get/delete; no following |
 
-**Not covered anywhere:** concurrent/multiprocess behavior (no thread or
-two-process test in the crate), enumeration (no API to test), `api_version`
-distinctness, `EntityIdentity` has no unit tests in kopacetic-core (domain
-mod.rs has none; lib.rs is re-exports only).
+**Not covered anywhere:** concurrent behavior (no thread or two-process test
+in the crate; note the crate's tests are single-process — a thread test
+would not establish cross-process semantics either), enumeration (no API to
+test), `api_version` distinctness, `EntityIdentity` has no unit tests in
+kopacetic-core (domain mod.rs has none; lib.rs is re-exports only).
 
 ## 6. Implemented vs missing — one-line ledger
 
 - **Implemented:** injective safe identity codec; put/get/delete with
-  reconciliation and pruning; cross-identity isolation; per-file atomic
-  publication; symlink-at-root rejection; race-benign prefix cleanup;
-  solid roundtrip/isolation/hostile-path tests.
-- **Missing concept/API:** entity enumeration/discovery; canonical core-
-  owned identity key (single encoding, `Hash`/`Ord`/`Display`); entity-level
-  publication boundary (lock/snapshot/staging) — or an explicit documented
-  statement that per-file last-writer semantics are the contract;
-  concurrency tests pinning whichever contract is chosen.
+  reconciliation and pruning; disjoint per-identity address derivation
+  (independence source-inferred, untested under concurrency); legacy-layout
+  write execution via `std::fs::write`/`compio_fs::write`; symlink-at-root
+  rejection; prune stops benignly on contention; solid roundtrip/isolation/
+  hostile-path tests (single-process only).
+- **Missing concept/API:** atomic publication at any granularity on the
+  live path (rooted v1 mutation exists but is unwired — README:274–280);
+  entity enumeration/discovery; a core-owned identity **equality law** with
+  a portable codec where address derivation must agree across backends; a
+  stated same-identity concurrency contract; process-pair tests pinning it.
 
 ## 7. Proposed narrowly scoped handoff work for Kopacetic
 
 Cam scope only; integrated design and backend-neutrality stay with the
-parent, Turso multiprocess with G.
+parent, Turso multiprocess with G. The requirements landing spot is the
+native consumer handoff at
+`/home/rektide/src/kopacetic/doc/consumer/term-preserver.md`
+(proposed-not-implemented); the items below are grounded purely in the
+source evidence of §§1–6.
 
-1. **Own the key in core.** One canonical, documented encoding of
-   `EntityIdentity` in kopacetic-core (codec bytes + `Display` +
-   `Hash`/`Ord` derives); derive the Caminus codec and Turso identity
-   columns from it, closing the `None` vs `Some("")` divergence
-   (§1). Small, test-only-visible, unblocks every map/collection use.
-2. **Enumerate v1.** A minimal `CaminusStore::identities()` that walks
-   `v1/` and decodes — promoted from "walking is not a supported API" to a
-   versioned layout contract; a matching `decode_path` stays internal.
-   This is the single missing collection primitive for shell-state
-   listing ("which shells have state here?").
-3. **State the same-identity contract.** Pick one, document it in the
-   crate: (a) per-file last-writer reconciliation is the semantics, or
-   (b) add a minimal entity-level guard (single advisory lock file at the
-   entity prefix) before write. Either is small; today the behavior is
-   real but unstated, and it is the one hazard for two processes touching
-   one shell's state.
-4. **Pin concurrency with tests.** Two-process (or two-thread) harness:
-   different identities in parallel (expect clean interleave), same
-   identity (assert the documented contract). Turns §2's analysis into a
-   regression boundary.
+The write-first requirement is **independent different-key writers**: many
+processes, each owning distinct identities, persisting under one shared
+root without coordination. That works today at the address level (§2) and
+needs qualification tests more than new machinery.
 
-Items 1-2 are the core of the "collections" gap; 3-4 make shared-root
-multiprocess behavior explicit rather than accidental.
+1. **Define the identity equality law in core.** Specify what makes two
+   `EntityIdentity` values the same entity — including whether `None` and
+   `Some("")` are equal — plus `Hash`/`Ord` derives so collections can key
+   on it. Provide a portable codec **only where backends must derive
+   addresses or keys compatibly**; identical physical encodings and a
+   `Display` form are *not* required, and no migration of existing Caminus
+   trees or Turso rows is demanded. The current `None`-collapsing Turso
+   mapping (connection.rs:22–24) versus None-preserving Caminus codec
+   (§1) is precisely the kind of question the law must answer.
+2. **State the same-identity contract for the live path.** Document what a
+   concurrent reader/writer of one identity may observe under
+   `std::fs::write` reconcile (torn files and mixed-field states are
+   currently observable). If a guard is added, note that an advisory
+   writer lock alone only serializes writers — readers still see
+   mid-reconcile state unless they take the same lock or publication
+   becomes snapshot-atomic; atomicity for readers is a separate, larger
+   piece (rooted v1 wiring) and is not demanded here.
+3. **Qualify different-key independence with process-pair tests.** Spawned
+   *processes* (not threads — a thread test exercises one process's
+   memory, not cross-process semantics): different identities writing in
+   parallel under one root (expect clean interleave, no spurious failures
+   beyond the §2 ENOENT window), and the shared-prefix create/prune race,
+   to pin current behavior as a regression boundary.
+4. **Enumeration — later.** Per write-first steering, `identities()` over a
+   versioned layout is deferred until the write side lands; recorded in
+   the README's discovery-absent decision until then.
+
+Priority for the shell-state use case: 1 and 3 unblock safe multi-shell
+persistence now; 2 makes same-key behavior honest; 4 follows.
