@@ -43,8 +43,10 @@ sources:
     title: FX tmux source trace, with reviewed topology corrections
   - resource: /design/tracking/caminus-collections.glm53fx.md
     title: Reviewed collection and live-write-path assessment
+  - resource: /design/tracking/turso-multiprocess.glm53m.md
+    title: Reviewed pinned-driver ownership trace and persistent-process short-lived-writer probes
 verification:
-  method: Source inspection; proposed behavior is not implemented or runtime-tested
+  method: Source inspection and review of G's isolated Turso process probes; proposed shell behavior is not implemented or runtime-tested
 extensions:
   ticket: tipre-tracking
   related_work: [kop-collections]
@@ -242,9 +244,13 @@ belongs on a worker, outside the relay and outside the observed-state mutex.
 the selected store for a publication, writes, and releases its connections and
 file handles rather than keeping a database open for the shell's whole lifetime.
 Worker/process lifetime and store-handle lifetime are separate. For a shared
-Turso file this allows writers to take turns; overlapping opens still need bounded
-contention handling and exact handle-release qualification. Do not infer a need
-for a permanent database service from the long-held-handle failure alone.
+Turso file this allows writers to take turns. G verified handle release with two
+persistent OS processes and twelve alternating publications; a controlled overlap
+also acquired successfully after bounded locking-error retries and owner release.
+The database manager retains weak references, so dropping all owning handles
+releases the lock while the process lives. Production integration still needs
+bounded contention handling and WAL/checkpoint qualification. This model does not
+require a permanent database service.
 
 For a latest-state contract, a bounded dirty-state handoff can coalesce updates
 while a write is in progress. The worker then publishes the newest complete state.
@@ -281,8 +287,11 @@ and guarantees; there is no universal store trait in the inspected core. Keep a
 narrow publisher boundary in term-preserver and develop shared collection/write
 contracts in Kopacetic. G's pinned-driver probe confirmed that a second process's
 default Turso open fails while the first keeps the database open. The requested
-short-lived writer topology must instead qualify close/reopen handoff and
-overlapping-open retries; distinct keys alone do not remove that coordination.
+short-lived writer topology **works on the existing pin**, as demonstrated by
+close/reopen handoff and bounded overlapping-open retries. Distinct keys do not
+remove coordination: every publication temporarily owns the file lock, then
+releases all handles. Plain drop preserves committed WAL frames without itself
+checkpointing them; qualify the eventual close/checkpoint policy and its cost.
 See [Turso assessment](turso-multiprocess.glm53m.md) and
 `kop-collections-turso-writers` for that evolving evidence.
 
