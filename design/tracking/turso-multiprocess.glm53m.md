@@ -37,18 +37,29 @@ file**, each writing a different entity?
 
 ## Verdict
 
-**No — not with the current open path.** `kopacetic-turso` opens with
-`turso::Builder::new_local(path).build()` and default flags
-([connection.rs, `storage::connection::open`](file:///home/rektide/src/kopacetic/crates/kopacetic-turso/src/storage/connection.rs)).
-In the pinned driver (`turso = "0.8.0-pre.4"`, locked in the workspace
-`Cargo.lock`; published 2026-08-11) the default mode is **single-OS-process by
-design**: the first process takes an exclusive file lock at open and every
-later process fails fast.
+**Yes for short-lived open → put → drop writers — the topology the human
+selected; no for concurrent long-held handles.** With
+`kopacetic-turso`'s current open path (`turso::Builder::new_local(path)`
+with default flags, [connection.rs,
+`storage::connection::open`](file:///home/rektide/src/kopacetic/crates/kopacetic-turso/src/storage/connection.rs)),
+each publication that opens the store, puts its entity, and drops every
+handle works across multiple long-lived producer processes on the pinned
+driver (`turso = "0.8.0-pre.4"`, locked in the workspace `Cargo.lock`;
+published 2026-08-11): dropping the handles releases the exclusive file
+lock while the process lives, overlapping publications fail fast with a
+locking error, and a bounded retry acquires as soon as the current owner
+drops. See [Short-lived writers](#short-lived-writers-open--put--drop-across-processes)
+and probe phases 4–5 for the evidence.
 
-- The failure is explicit, not corruption: the second `build()`/open returns a
-  locking error ("Failed locking file … File is locked by another process",
-  `LimboError::LockingError`). Confirmed against Kopacetic's own `TursoStore`
-  by the [two-process probe](#two-os-process-probe) below.
+What does **not** work is the originally assessed shape — independent
+processes holding stores open at the same time. There the default mode is
+single-OS-process by design:
+
+- The failure is explicit, not corruption: the second concurrent
+  `build()`/open returns a locking error ("Failed locking file … File is
+  locked by another process", `LimboError::LockingError`). Confirmed against
+  Kopacetic's own `TursoStore` by the [two-process probe](#two-os-process-probe)
+  below.
 - There *is* an opt-in multi-process mode (`experimental_multiprocess_wal`),
   but Kopacetic does not enable it, and on this exact pin it contains a known
   unfixed reader race plus a mixed-mode guard that the bindings path never
@@ -57,19 +68,17 @@ later process fails fast.
 For the [consumer contract](file:///home/rektide/src/kopacetic/doc/consumer/term-preserver.md)'s
 original question — *can direct independent processes write different
 entities in one database file?* — the answer for **long-lived per-proxy
-handles** is: **rejected at open by default** (before entity semantics
-matter); **only mechanically possible via the experimental flag**, which this
-pin does not make safe. The topology correction below adds the shape the
-human actually wants: **short-lived writers** (open → put → drop per
-publication), which the pin *does* support — see
-[Short-lived writers](#short-lived-writers-open--put--drop-across-processes).
+handles** is therefore: rejected at open by default (before entity semantics
+matter), and only mechanically possible via the experimental flag, which
+this pin does not make safe; for **short-lived writers**, the answer is yes,
+on the current path, with the lock itself as the serializer.
 
 ## Two-OS-process probe
 
 Minimal empirical confirmation lives in gitignored scratch:
 [`.test-agent/turso-multiprocess-probe/`](file:///home/rektide/src/term-preserver/.test-agent/turso-multiprocess-probe/README.md)
-(single binary re-execing itself as the child; three short scenarios, no
-benchmarks). Results on the pinned driver, 2026-10-14:
+(single binary re-execing itself as the child; a handful of short scenarios,
+no benchmarks). Results on the pinned driver, 2026-10-14:
 
 1. **Kopacetic exact path** — parent `TursoStore::open` + write of entity
    `alpha`; second OS process `TursoStore::open` on the same file →
@@ -121,7 +130,7 @@ benchmarks). Results on the pinned driver, 2026-10-14:
    for the default WAL index — its frame cache and read-locks are
    process-local by construction, with no SQLite-style `-shm` index.
 
-## The four distinctions that matter
+## The distinctions that matter
 
 | Shape | Works on 0.8.0-pre.4 default? | Why |
 |---|---|---|
