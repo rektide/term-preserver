@@ -27,6 +27,10 @@ sources:
     title: Current CLI entry path
   - resource: /src/tmux.rs
     title: Local tmux sampling boundary
+  - resource: /src/color.rs
+    title: Existing raw and normalized color representation
+  - resource: "file:///home/rektide/src/facet-format-path/src/projection/serializer.rs"
+    title: Inspected map-key projection requires semantic string keys
   - resource: "https://github.com/rektide/kopacetic/tree/5090da3eae1915848d550425740a317fb11671f5"
     title: "Local Kopacetic source inspected: README, core entity types, Turso storage/schema, Rkyv and Caminus READMEs"
   - resource: "https://github.com/atuinsh/atuin/tree/6896db72fa3e56f996738c4aef02d250cfa24ee1/crates/atuin-pty-proxy"
@@ -195,6 +199,14 @@ backend decision still to make; the entity model works for either.
 The persistent payload should derive Facet deliberately. Existing Serde derives
 do not satisfy this requirement, and schema changes need explicit revision and
 migration decisions. Keep revisions and history/query evolution with Kopacetic.
+
+One concrete adapter requirement: current palette/special slots are
+`BTreeMap<u32, ColorSpec>`, but the inspected path projector accepts string map
+keys. Persist a sorted sequence of `{ index: u32, color: ... }` entries (or an
+explicit canonical string-key adapter), rather than assuming a Facet derive makes
+the current slot layout directly storable. Preserve both `ColorSpec.raw` and its
+optional normalized RGB. This small persistent DTO also isolates schema revisions
+from changes to relay-internal types.
 
 ## Coherent implementation slices after discussion
 
