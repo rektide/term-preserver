@@ -181,6 +181,11 @@ Initially observe feature-detection queries without answering. If registry-side
 consumption should advertise support even with an unaware outer terminal, design
 an explicit query interception/single-responder policy. Protocol presentation is
 unspecified: supporting it need not entail synthesizing window titles.
+This choice affects coverage: applications that require a positive probe may
+emit no reports behind an unaware terminal or tmux. A fully self-sufficient
+tracking mode can consume the query and answer for its own status store while
+continuing to relay reports outward. That requires ordered PTY-input writes and
+one reply owner; it is a deliberate extension beyond passive observation.
 
 Placement determines coverage:
 
