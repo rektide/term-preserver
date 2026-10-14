@@ -8,7 +8,7 @@ author: model:openai/gpt-6-astra
 date: 2026-10-14
 sources:
   - resource: "opencode://ses_ec84404aaffeHUijDXZqczAc1F"
-    title: "Commissioned FX and G research and developed the shell-mode/Kopacetic design; user selected research before implementation"
+    title: "Commissioned FX/G protocol and backend research, developed the shell design, and handed write-first collection requirements to Kopacetic"
 ---
 
 # Shell and terminal-state tracking
@@ -21,8 +21,18 @@ sources:
 
 ## Protocol and multiplexer evidence
 
+- [OSC 9;4 and OSC 7501 brief](osc-protocols.glm53m.md) — G research on
+  progress and program-status semantics, lifetimes, capability detection, and
+  implementation support.
 - [OSC 9;4 in tmux](tmux-osc94.glm53fx.md) — FX source trace through parsing,
   retained pane state, formats, terminal feature gating, and client propagation.
+
+## Kopacetic handoff
+
+- [Shell-writer consumer contract](file:///home/rektide/src/kopacetic/doc/consumer/term-preserver.md)
+  — backend-neutral primary keys and incremental writes, Caminus-first direction,
+  independent-process qualification, and the relationship to earlier collection
+  work. Kopacetic owns the reusable contract; term-preserver owns protocol state.
 
 ## Earlier foundations
 

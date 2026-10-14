@@ -8,7 +8,7 @@ author: model:openai/gpt-6-astra
 date: 2026-10-14
 sources:
   - resource: "opencode://ses_ec84404aaffeHUijDXZqczAc1F"
-    title: "User direction and source inspection for shell-local tracking; research and design commissioned before implementation"
+    title: "Shell-local tracking design, protocol integration, and user refinement toward write-first Caminus publication and Kopacetic collection assessment"
   - resource: /doc/design/2026-06-08-title-proxy.md
     title: Original Atuin PTY-proxy inspiration and lightweight relay design
   - resource: /doc/design/2026-06-08-child-session-orchestration.md
@@ -35,6 +35,12 @@ sources:
     title: "Local Kopacetic source inspected: README, core entity types, Turso storage/schema, Rkyv and Caminus READMEs"
   - resource: "https://github.com/atuinsh/atuin/tree/6896db72fa3e56f996738c4aef02d250cfa24ee1/crates/atuin-pty-proxy"
     title: Archived Atuin crate manifest and osc133.rs inspected
+  - resource: "https://www.superlogical.com/rex/docs/build/program-status"
+    title: Program Status Protocol revision 0.4; records, limits, reset and prompt lifetimes verified directly
+  - resource: /design/tracking/osc-protocols.glm53m.md
+    title: G protocol research, read after completion
+  - resource: /design/tracking/tmux-osc94.glm53fx.md
+    title: FX tmux source trace, with reviewed topology corrections
 verification:
   method: Source inspection; proposed behavior is not implemented or runtime-tested
 ---
@@ -149,6 +155,45 @@ A child exit updates lifecycle; it does not rewrite the last progress observatio
 to “complete.” A leftover running record after an abrupt death is a last report,
 not proof that its process remains alive. No automatic record deletion is needed.
 
+### Protocol-driven state lifetime
+
+OSC 7501 is the **Program Status Protocol**, not another progress-bar spelling.
+It holds a bounded set of records addressed by hierarchical IDs, including a
+root record. Each report replaces one complete record; `clear` removes the
+addressed subtree. Keep that record ID scoped **within** the shell entity: it is
+not Kopacetic's entity identity.
+
+The source-verified revision 0.4 requires dropping `working` and `blocked` records
+at **OSC 133 A** (new prompt) and attached-child exit. `done` and `error` survive.
+RIS clears all records; alternate-screen transitions and DECSTR do not. Thus the
+parser/reducer slice also needs the prompt and full-reset edges. Retain the last
+OSC 9;4 observation separately: its staleness rules differ between consumers.
+
+Track stored versus inherited `app` separately so ancestor updates can change the
+effective app without mutating child reports. Validate reports before applying
+them, count the 4096-byte cap over the **whole sequence**, and cap record count.
+The existing parser's 4096-byte data cap is not the same bound. Keep stateful
+activity records out of generic title re-emission on exit.
+
+Initially observe feature-detection queries without answering. If registry-side
+consumption should advertise support even with an unaware outer terminal, design
+an explicit query interception/single-responder policy. Protocol presentation is
+unspecified: supporting it need not entail synthesizing window titles.
+
+Placement determines coverage:
+
+```text
+terminal -> tmux pane -> term-preserver -> zsh/app
+                        observes raw reports before tmux
+
+terminal -> term-preserver -> tmux client -> pane app
+            observes tmux's conditional selected-pane projection
+```
+
+The inspected tmux stores 9;4 per pane and can re-emit the selected pane's state;
+it has no 7501 handler. Explicit DCS passthrough is a separate path. An outer
+proxy is therefore not equivalent to per-shell observation inside each pane.
+
 ## Publication boundary
 
 The byte path should remain small:
@@ -190,11 +235,22 @@ its only visible local modification was unrelated Beads data. Relevant API facts
 | `kopacetic-turso` | Preferred SQL backend; `put` replaces an entity and path rows transactionally, `connection()` enables queries across entities. Async API, with driver/concurrency limits documented by its owner. |
 | `kopacetic-caminus` | Inspectable field-per-file state and access to low-level watch/history/VCS policies. Complete entity updates are not atomic; the filesystem representation constrains payload keys. |
 
-For **just durable state on each shell**, start with Rkyv behind one narrow
-publisher adapter. For **listing/searching all registered shells immediately**,
-Turso is the better existing substrate. Rkyv's missing collection discovery should
-not turn into a second home-grown registry in term-preserver. This is the material
-backend decision still to make; the entity model works for either.
+**User refinement:** prioritize the write side and **Caminus**; keep Turso useful
+and a future 9P backend possible. Reader discovery need not drive the initial
+backend choice. The earlier Rkyv-first suggestion is superseded by this preference.
+
+Use the same `EntityIdentity` and faceted payload for backend adapters. Existing
+stores have similar `put` operations but different sync/async APIs, return types,
+and guarantees; there is no universal store trait in the inspected core. Keep a
+narrow publisher boundary in term-preserver and develop shared collection/write
+contracts in Kopacetic. Before choosing shared-file Turso writes, establish its
+pinned driver's actual **cross-process** ownership contract; distinct entity keys
+alone do not prove concurrent database-file safety.
+
+Caminus already has an identity-addressed collection root, not just one value
+tree. Its precise multi-writer guarantees and the shared primary-key contract
+are the subject of the follow-up collection assessment. Neither a 9P mount nor
+a backend switch should silently redefine object identity or imply history.
 
 The persistent payload should derive Facet deliberately. Existing Serde derives
 do not satisfy this requirement, and schema changes need explicit revision and
@@ -236,3 +292,6 @@ shared slots when extending the current parser.
   composition remains useful, while shell-entry argv semantics need their own path.
 - [Tracking research index](README.md): companion protocol and tmux evidence,
   including which side of the multiplexer can observe a shell's own metadata.
+- [Kopacetic shell-writer handoff](file:///home/rektide/src/kopacetic/doc/consumer/term-preserver.md):
+  shared collection/write requirements and the existing primary-key concept,
+  connected to Kopacetic's earlier akfig collection inquiry.
