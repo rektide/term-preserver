@@ -8,7 +8,7 @@ author: model:openai/gpt-6-astra
 date: 2026-10-14
 sources:
   - resource: "opencode://ses_ec84404aaffeHUijDXZqczAc1F"
-    title: "Commissioned FX/G protocol and backend research, developed the shell design, and handed write-first collection requirements to Kopacetic"
+    title: "Commissioned FX/G research, developed the shell design including human-selected OSC 7501 replies, and handed collection requirements to Kopacetic"
 ---
 
 # Shell and terminal-state tracking

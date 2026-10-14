@@ -8,7 +8,7 @@ author: model:openai/gpt-6-astra
 date: 2026-10-14
 sources:
   - resource: "opencode://ses_ec84404aaffeHUijDXZqczAc1F"
-    title: "Shell-local tracking design, protocol integration, and user refinement toward write-first Caminus publication and Kopacetic collection assessment"
+    title: "Shell-local tracking design, write-first Caminus/Kopacetic assessment, and human selection of proxy-owned OSC 7501 capability replies"
   - resource: /doc/design/2026-06-08-title-proxy.md
     title: Original Atuin PTY-proxy inspiration and lightweight relay design
   - resource: /doc/design/2026-06-08-child-session-orchestration.md
@@ -181,15 +181,20 @@ them, count the 4096-byte cap over the **whole sequence**, and cap record count.
 The existing parser's 4096-byte data cap is not the same bound. Keep stateful
 activity records out of generic title re-emission on exit.
 
-Initially observe feature-detection queries without answering. If registry-side
-consumption should advertise support even with an unaware outer terminal, design
-an explicit query interception/single-responder policy. Protocol presentation is
-unspecified: supporting it need not entail synthesizing window titles.
-This choice affects coverage: applications that require a positive probe may
-emit no reports behind an unaware terminal or tmux. A fully self-sufficient
-tracking mode can consume the query and answer for its own status store while
-continuing to relay reports outward. That requires ordered PTY-input writes and
-one reply owner; it is a deliberate extension beyond passive observation.
+**Human-selected behavior:** tracking mode advertises its own OSC 7501 support.
+Applications that require a positive probe should report even behind an unaware
+terminal or tmux. Consume the feature-detection query rather than forwarding it,
+and inject exactly one reply into the child's PTY input, declaring the states and
+kinds this implementation supports. Continue relaying actual reports outward.
+Protocol presentation is unspecified: support through a registry does not require
+synthesizing titles or another display effect.
+
+Serialize injected replies with the existing stdin relay so reply bytes cannot
+interleave with user input. The proxy must answer the query before forwarding a
+following primary-DA probe (`CSI c`) that an emitter uses to detect unsupported
+terminals. Query and DA in the same output read are an important ordering test.
+When tracking support is disabled, preserve the ordinary query/reply path. This
+single-responder behavior is a deliberate extension beyond passive observation.
 
 Placement determines coverage:
 
@@ -290,6 +295,9 @@ from changes to relay-internal types.
    malformed input, and repeated/state-only updates against the protocol brief.
    For 7501, verify whole-record replacement, subtree clearing, inherited app,
    count eviction, and prompt/exit/RIS lifetimes. Queries must not mutate state.
+   In tracking mode, verify one proxy-owned capability reply, query suppression
+   toward the outer terminal, serialized input injection, and query-before-DA
+   ordering. With tracking disabled, verify the outer terminal still owns replies.
    Test the whole-sequence byte limit and incomplete buffered sequences at EOF;
    observation must not silently eat unrelated output at the boundary.
 2. Shell entry and one-shot lifecycle, with exact argv forwarding, self-recursion
