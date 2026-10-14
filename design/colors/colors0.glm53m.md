@@ -8,7 +8,7 @@ author: model:zai-coding-plan/glm-5.3#max
 date: 2026-10-14
 sources:
   - resource: "opencode://ses_ec7f4e3bcffeQTeR4NqyDYJxS7"
-    title: "Commissioned colors design: verified legacy + kitty OSC 21 semantics against xterm ctlseqs and kitty docs/source, drafted state model, control surface, and tickets"
+    title: "Commissioned colors design: verified legacy + kitty OSC 21 semantics against xterm ctlseqs and kitty docs/source, drafted state model, control surface, and tickets; revision 2 applied review corrections (re-emit/reset accuracy, query arbitration, shared-I/O pointer, staleness honesty)"
   - resource: "https://vtdn.dev/docs/osc/kitty-osc21"
     title: "vtdn kitty OSC 21 page (AI-generated, experimental) — read 2026-10-14; pair separator corrected against the primary spec and kitty source"
   - resource: "https://sw.kovidgoyal.net/kitty/color-stack/"
@@ -133,19 +133,34 @@ value:= color-spec | "?" (query) | "" (dynamic) ; bare key (no "=") = reset
 ## Conceptual distinctions
 
 **Recorded state vs applied terminal state.** `ObservedSlots` is a cache of
-*child writes*. The terminal's actual colors additionally include its
-configured defaults, writes from before the proxy attached, other tabs'
-tooling, and multiplexer policy (tmux rewrites/consumes OSC — see
-[tmux-osc94]). Two honest read levels follow: *recorded* (what the child
-asked for under this proxy — always available, exact) and *queried* (what
-the terminal says now — needs a roundtrip, may say `dynamic`/empty).
-Publishing or scripting must label which level it returns; a read that
-silently substitutes one for the other lies by omission.
+*child writes the parser supports* — an **observed/requested** record, not
+the terminal's current or applied colors. Three honesty limits follow.
+First, the terminal's actual colors additionally include its configured
+defaults, writes from before the proxy attached, other tabs' tooling, and
+multiplexer policy (tmux rewrites/consumes OSC — see
+[tmux-osc94]). Second, coverage is only as good as the parser:
+`ColorSpec` normalizes `rgb:`, `rgbi:`, and `#` forms — **named colors and
+alpha-suffixed specs keep their raw text with `rgb: None`** — and today's
+re-emit emits **only retained set values**: a reset (104/105/110-…) clears
+its slot and is *not* re-emitted as a reset, so the outer terminal's
+resource default silently reappears rather than being reconstructed.
+Third, **unmodeled operations can invalidate the record without trace** —
+color-stack push/pop (kitty OSC 30001/30101, xterm XTPUSHCOLORS), RIS,
+OSC 6/106 — so an exact-current-state claim is unavailable in principle.
+Two honest read levels follow: *recorded* (supported, observed/requested,
+**possibly stale** — future modeling of those operations should degrade
+the label to *unknown* when they are observed, not pretend precision) and
+*queried* (what the terminal says now — needs a roundtrip, may answer
+`dynamic`/empty). Publishing or scripting must label which level it
+returns; a read that silently substitutes one for the other lies by
+omission.
 
 **Write authority.** Today only the child writes (observed). The goal adds
 an **external writer**: a control surface that injects OSC toward the outer
-terminal *and* records into the same state, so recorded state stays coherent
-with what was applied. Writes should prefer OSC 21 when the outer terminal
+terminal *and* records into the same state — with the same honesty limit:
+an injected write is recorded as **dispatched/requested**, not proved
+applied; only a query roundtrip can confirm what the terminal did with it.
+Writes should prefer OSC 21 when the outer terminal
 supports it (named keys, one sequence) and fall back to legacy OSC 4/10/11/12
 — capability detection is a query-roundtrip concern (below). Injected bytes
 join the PTY→stdout path at a defined point (the relay's write side), never
@@ -153,14 +168,41 @@ the parser's input, so observation and injection cannot loop.
 
 **Read authority and query roundtrips.** Only the terminal can answer
 "what color is it really". Replies arrive on the **stdin side** of the
-proxy (terminal → child), which today is relayed unexamined — the same new
-observation point the notifications design needs. Constraints the query
-design must respect: replies are **not request-correlated** (no ids in
-legacy or 21), so queries must be **single-flight** (serialize, match by
-shape, timeout to "unknown"); the reply terminator mirrors the query's; a
-racing child can interleave its own reads. The proxy should **forward and
-sniff, never answer from recorded state** — the terminal is the authority,
-and the recorded overlay does not know resource defaults.
+proxy (terminal → child), which today is relayed unexamined — the
+observation point the parent's shared **`tipre-terminal-io`** capability
+(input observation, serialized injection, output/query arbitration) will
+provide. The hard problem is **ownership of replies**, and it is harder
+than single-flight: legacy (`OSC 10;?`, `4;c;?`) and kitty OSC 21 replies
+are **not request-correlated** — nothing in a reply says which query it
+answers — and the *child* can issue its own queries at any moment, so
+serializing the proxy's queries among themselves proves nothing. When a
+reply arrives, the proxy cannot always tell whether it answers a
+proxy-originated or child-originated query; assigning it blindly to either
+is fabrication. Requirements any design must satisfy (per xterm ctlseqs
+and the kitty spec, both primary):
+
+- **Child-origin replies must be forwarded** to the child untouched —
+  the terminal answered the child, and swallowing that breaks the child.
+- **Proxy-origin replies must be consumed** — injecting a reply the child
+  never asked for into its stdin corrupts the child's own query parsing.
+- **Late and timed-out replies need an owner**: a reply arriving after the
+  proxy gave up must either be forwarded (it may answer the child) or
+  reported as ambiguous, per an explicit policy — not silently matched to
+  the expired query.
+- **Ambiguity must be reportable.** With interleaved child queries, a
+  shape-matched reply can be genuinely unassignable; the query surface
+  must be able to answer "ambiguous / unknown" rather than guess.
+
+"No synthesis from recorded state" is a floor, not a policy — it does not
+imply "always forward," and uncorrelated replies cannot always be
+assigned. Acceptable designs include (non-exhaustively, spelling the
+uncertainty rather than building a large broker): deferring proxy-origin
+queries while any child-origin query is outstanding (observed on the
+output side); a bounded queue of pending proxy queries with shape+time
+matching and honest ambiguity; or declaring support limits up front
+(e.g. proxy queries only when no child query traffic has been seen). Which
+combination to adopt is the `tipre-colors-query` ticket's decision to
+make and document; this design fixes the requirements, not the mechanism.
 
 **Reset, dynamic, unset — three different things.** Legacy resets
 (104/110-…) mean "terminal, restore your default" — the proxy records the
@@ -192,21 +234,27 @@ cleaner restore, noted above as out of scope.
    Fix the OSC 10–19 chained-parameter divergence while touching this area.
 3. **Control surface** (new, small): a Unix-socket or CLI channel
    (`term-preserver color get|set|query|watch`) — `get` returns recorded
-   state (level-labeled); `set` injects (OSC 21 when detected, else legacy)
-   and records; `query` performs a single-flight forward-and-sniff
-   roundtrip and returns terminal-truth; `watch` streams slot changes.
-   Phasing: `get` needs only the state model; `set` needs injection;
-   `query` needs the stdin-side observer. Socket path via env var so
-   external scripts can find the running proxy.
-4. **Shared machinery**: the stdin-side OSC observer and the
-   injection/serialization point are shared with the notifications work
-   ([notifications0](../notifications/notifications0.glm53m.md)) and the
-   7501 responder ticket (`tipre-tracking-status-responder`); build once,
-   consume from both.
-5. **Not in scope**: color stacks (30001/30101, XTPUSHCOLORS), OSC 6/106
+   state (level-labeled, possibly-stale qualification included); `set`
+   injects (OSC 21 when detected, else legacy) and records
+   **dispatched/requested**, not applied; `query` performs an arbitrated
+   roundtrip under the ownership rules above and returns terminal-truth or
+   an honest "ambiguous/unknown"; `watch` streams slot changes. Phasing:
+   `get` needs only the state model; `set` needs injection; `query` needs
+   the shared terminal-I/O capability. Socket path via env var so external
+   scripts can find the running proxy.
+4. **Shared machinery**: stdin-side observation, serialized injection, and
+   query arbitration are the parent-owned **`tipre-terminal-io`**
+   capability; the colors query consumes it without depending on any
+   notification- or 7501-specific work — color query and notification
+   capabilities remain independent consumers of the same I/O layer.
+5. **Not in scope (each a future scope needing its own honest
+   stale/unknown view)**: color stacks (30001/30101, XTPUSHCOLORS), broad
+   reset invalidation beyond the modeled 104/105/110-…, OSC 6/106
    special-mode toggles, RIS/full-reset tracking, tmux-internal color
-   policy. Each interacts with "current state" semantics and deserves its
-   own look before any proposal.
+   policy. Each changes terminal color state the proxy does not model, so
+   until modeled, observations of them should degrade recorded-state
+   confidence (toward *unknown*) rather than leave stale *set* values
+   standing as if exact.
 
 ## Tickets (pointer, not acceptance)
 
@@ -219,9 +267,12 @@ queryable — terminal color state.
 - `tipre-colors-osc21` — observe kitty OSC 21 set/dynamic/reset/query
   captures into the state model and re-emit coverage.
 - `tipre-colors-write` — external write path: control-channel `set`
-  injecting OSC 21/legacy toward the outer terminal and recording.
-- `tipre-colors-query` — single-flight query roundtrip over the stdin-side
-  observer, capability detection for write preference, timeout policy.
+  injecting OSC 21/legacy toward the outer terminal and recording
+  dispatched/requested state.
+- `tipre-colors-query` — arbitrated query roundtrip over the shared
+  `tipre-terminal-io` capability (reply ownership, child/proxy
+  arbitration, ambiguity reporting), capability detection for write
+  preference.
 
 ## References
 
