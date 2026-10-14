@@ -153,7 +153,7 @@ Represent **unobserved** separately from a protocol's explicit clear/idle/hidden
 state. Retain each protocol independently and derive any combined UI status later.
 A child exit updates lifecycle; it does not rewrite the last progress observation
 to “complete.” A leftover running record after an abrupt death is a last report,
-not proof that its process remains alive. No automatic record deletion is needed.
+not proof that its process remains alive. No automatic entity deletion is needed.
 
 ### Protocol-driven state lifetime
 
@@ -193,6 +193,10 @@ terminal -> term-preserver -> tmux client -> pane app
 The inspected tmux stores 9;4 per pane and can re-emit the selected pane's state;
 it has no 7501 handler. Explicit DCS passthrough is a separate path. An outer
 proxy is therefore not equivalent to per-shell observation inside each pane.
+Some emitters may themselves DCS-wrap reports for tmux. Direct OSC recognition
+does not automatically decode that escaped envelope: assess the actual emitters
+and add explicit passthrough-envelope decoding if needed, with tests preventing
+accidental nested captures. Keep wrapped versus direct observations distinguishable.
 
 ## Publication boundary
 
@@ -269,6 +273,10 @@ from changes to relay-internal types.
 1. Typed protocol updates and reducers, preserving independent slots and wire
    pass-through. Test terminators, fragmentation, clear/default semantics,
    malformed input, and repeated/state-only updates against the protocol brief.
+   For 7501, verify whole-record replacement, subtree clearing, inherited app,
+   count eviction, and prompt/exit/RIS lifetimes. Queries must not mutate state.
+   Test the whole-sequence byte limit and incomplete buffered sequences at EOF;
+   observation must not silently eat unrelated output at the boundary.
 2. Shell entry and one-shot lifecycle, with exact argv forwarding, self-recursion
    prevention, non-TTY behavior, exit status, and PTY restoration tests.
 3. Per-shell entity publication through the selected Kopacetic adapter. Verify
