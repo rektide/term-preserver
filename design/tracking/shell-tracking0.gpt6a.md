@@ -41,6 +41,8 @@ sources:
     title: G protocol research, read after completion
   - resource: /design/tracking/tmux-osc94.glm53fx.md
     title: FX tmux source trace, with reviewed topology corrections
+  - resource: /design/tracking/caminus-collections.glm53fx.md
+    title: Reviewed collection and live-write-path assessment
 verification:
   method: Source inspection; proposed behavior is not implemented or runtime-tested
 ---
@@ -252,9 +254,13 @@ pinned driver's actual **cross-process** ownership contract; distinct entity key
 alone do not prove concurrent database-file safety.
 
 Caminus already has an identity-addressed collection root, not just one value
-tree. Its precise multi-writer guarantees and the shared primary-key contract
-are the subject of the follow-up collection assessment. Neither a 9P mount nor
-a backend switch should silently redefine object identity or imply history.
+tree. The [reviewed collection assessment](caminus-collections.glm53fx.md) finds
+disjoint per-identity addresses but no cross-process qualification tests. Its
+live serializer still writes files in place: neither single-file nor complete
+entity publication is atomic. Keep that limitation explicit while qualifying
+independent-key writers and pursuing the owner's existing generation-publication
+work. Neither a 9P mount nor a backend switch should silently redefine object
+identity or imply history.
 
 The persistent payload should derive Facet deliberately. Existing Serde derives
 do not satisfy this requirement, and schema changes need explicit revision and

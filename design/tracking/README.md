@@ -33,6 +33,9 @@ sources:
   — backend-neutral primary keys and incremental writes, Caminus-first direction,
   independent-process qualification, and the relationship to earlier collection
   work. Kopacetic owns the reusable contract; term-preserver owns protocol state.
+- [Caminus collection assessment](caminus-collections.glm53fx.md) — FX trace of
+  keyed directory isolation, actual legacy write behavior, and process-level
+  qualification gaps; separates unwired atomic helpers from the live serializer.
 
 ## Earlier foundations
 
