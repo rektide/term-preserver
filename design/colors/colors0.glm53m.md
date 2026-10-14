@@ -67,7 +67,7 @@ dynamic and reset semantics, and an answer for colors xterm cannot express.
 
 ## Legacy family — what the specs actually say (verified)
 
-From [xterm ctlseqs], the bits that shape this design:
+From the [xterm ctlseqs document](https://invisible-island.net/xterm/ctlseqs/ctlseqs.txt), the bits that shape this design:
 
 - **Set-or-query duality.** For OSC 4, 5, and 10–19, a `?` in place of a
   color spec makes the sequence a query: xterm replies with *the same-form
@@ -93,7 +93,7 @@ From [xterm ctlseqs], the bits that shape this design:
 
 ## kitty OSC 21 — color control (authoritative)
 
-Primary spec: [kitty color-stack], parser verified in kitty's
+Primary spec: [kitty's color control page](https://sw.kovidgoyal.net/kitty/color-stack/), parser verified in kitty's
 `window.py::color_control` (`value.split(';')` — **pairs are semicolon-
 separated**; the vtdn page's colon syntax is wrong).
 
@@ -138,7 +138,7 @@ the terminal's current or applied colors. Three honesty limits follow.
 First, the terminal's actual colors additionally include its configured
 defaults, writes from before the proxy attached, other tabs' tooling, and
 multiplexer policy (tmux rewrites/consumes OSC — see
-[tmux-osc94]). Second, coverage is only as good as the parser:
+[tmux-osc94](../tracking/tmux-osc94.glm53fx.md)). Second, coverage is only as good as the parser:
 `ColorSpec` normalizes `rgb:`, `rgbi:`, and `#` forms — **named colors and
 alpha-suffixed specs keep their raw text with `rgb: None`** — and today's
 re-emit emits **only retained set values**: a reset (104/105/110-…) clears

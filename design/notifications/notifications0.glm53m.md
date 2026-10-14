@@ -100,7 +100,7 @@ changing delivery.
 
 ### kitty OSC 99 — rich notifications (authoritative)
 
-Primary spec: [kitty desktop-notifications]. **The vtdn page for OSC 99 is
+Primary spec: the [kitty desktop-notifications page](https://sw.kovidgoyal.net/kitty/desktop-notifications/). **The vtdn page for OSC 99 is
 materially wrong in several places**; everything below is from the primary
 spec, with kitty's parser source (`kitty/notifications.py`,
 `metadata.split(':')`) confirming the framing.
