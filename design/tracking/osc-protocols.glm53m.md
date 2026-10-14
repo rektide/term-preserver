@@ -285,15 +285,21 @@ nothing about the data plane changes. The differences from title tracking:
    child exit, because the spec makes those the destruction events for
    working/blocked. If term-preserver only passively stores reports it will
    retain stale "working" states a real terminal would have dropped.
-3. **No heartbeat in either protocol** — timestamps on every capture are
-   mandatory; staleness policy is the consumer's choice (Ghostty: 15 s for
-   9;4).
+3. **No heartbeat in either protocol** — a tracking recommendation (ours,
+   not a normative protocol rule): timestamp every capture so staleness is a
+   consumer decision (Ghostty chose 15 s for 9;4). The specs themselves
+   mandate no timestamps and no re-send.
 
 ### Parsing recommendations (src/osc.rs)
 
-- The streaming state machine already terminates OSC bodies on BEL/ESC \ and
-  caps captures at 4096 bytes — coincidentally the 7501 whole-sequence limit
-  and ample for 9;4. Extend `OscCapture` with `Progress { state, progress }`
+- The streaming state machine already terminates OSC bodies on BEL/ESC \.
+  Note the limits are *different kinds of bound*: the existing parser cap
+  applies to captured **data** after `ESC ]`, while the 7501 spec caps the
+  **whole sequence** — OSC introducer through terminator, framing bytes
+  included. Equal numbers do not make them equivalent: a spec-conformant
+  check must account for framing bytes itself (introducer `ESC ]`, code
+  `7501`, separators, and the two-byte ST or one-byte BEL) rather than lean
+  on the data cap. Extend `OscCapture` with `Progress { state, progress }`
   and `ProgramStatus { … }` variants; route on the leading code before `;`
   (the parser already dispatches `0/1/2/4/10/11/12`).
 - 9;4: parse `st` and optional `pr`; keep prior `progress` when `pr` is
@@ -318,13 +324,20 @@ nothing about the data plane changes. The differences from title tracking:
   after the process died contradicts the spec's own lifetime rule — either
   suppress stateful slots from re-emit or re-emit only `done`/`error`
    deliberately.
-- Feature detection: if term-preserver wants emitters to report even when the
-  outer terminal is dumb (e.g., kitty pre-0.39, foot, WezTerm), the proxy may
-  answer `OSC 7501 ; ?` on the terminal's behalf — but then it owns
-  translating records into whatever the outer terminal *can* show (e.g.,
-  synthesizing OSC 0/2 titles), and it must let the real terminal's own reply
-  reach the child if one arrives. Decide explicitly; do not answer by
-  accident.
+- Feature detection: replying to `OSC 7501 ; ?` is an *optional design role*
+  for the proxy, not an obligation the spec attaches to anything. The spec
+  leaves presentation entirely undefined — a replier promises only the
+  states/kinds grammar, and consuming reports into a registry/status store is
+  itself the useful behavior; no translation into window titles or other
+  outer-terminal presentation is implied or required. The real design need is
+  an explicit **single-responder strategy**: either intercept the query and
+  answer on the terminal's behalf (one reply owner, serialized with the stdin
+  relay), or pass it through untouched and stay silent — never both, or the
+  child can receive duplicate/conflicting replies. The corpus's recorded
+  human selection (proxy-owned capability replies in tracking mode) lives in
+  [shell-tracking0](shell-tracking0.gpt6a.md); the ordering constraint that
+  matters there is that a proxy reply must precede any following primary-DA
+  probe an emitter uses to detect non-support.
 
 ### Fit with the Kopacetic entity model
 
@@ -341,11 +354,21 @@ protocols unusually well:
 - Neither protocol carries history; that cleanly stays Kopacetic's
   responsibility, per the existing division in
   [shell-tracking0](shell-tracking0.gpt6a.md).
-- tmux/ssh/mosh transports carry both sequences as opaque bytes; whether the
-  *outer* terminal renders them varies (support matrix above), but the
-  proxy's entity tracking is independent of outer-terminal support.
+- Transport transparency differs: ssh and mosh carry both sequences as
+  opaque bytes, but **tmux is not a byte pipe for them** — in the inspected
+  revision tmux parses OSC and *consumes* unknown sequences such as 7501
+  (they do not reach the outer terminal), and it re-emits the selected
+  pane's 9;4 only conditionally. Whether the proxy sees these sequences at
+  all therefore depends on whether it sits outside or inside tmux; placement
+  is a coverage decision, not a detail. The tmux-side evidence and client
+  propagation rules are traced in the companion wave
+  [tmux-osc94](tmux-osc94.glm53fx.md); do not infer them from this brief.
 
 ## References (read 2026-10-14 unless noted)
+
+Spec-sourcing note: the primary spec (rev 0.4) was read directly both by this
+brief's author and, independently, by the commissioning session that
+requested the corrections recorded here.
 
 Primary:
 
