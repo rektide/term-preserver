@@ -47,6 +47,23 @@ policy remains `tipre-session-engine`; control-mode freshness remains
   current capture inventory and Atuin lineage; proposed shell entry, entity
   lifetime, publication boundary, backend choice, and history ownership.
 
+## Related terminal capabilities
+
+These designs remain proposals. Their tickets point to the reasoning rather
+than selecting every design choice.
+
+- **`tipre-notifications`** — [OSC 9, OSC 777 and kitty OSC 99](../notifications/notifications0.glm53m.md):
+  notification request events, bounded recent observations, and reported versus
+  derived notification lifecycle. Children cover each protocol; bare OSC 9 is P2
+  alongside progress-subcommand disambiguation.
+- **`tipre-colors`** — [readable and writable color state](../colors/colors0.glm53m.md):
+  correct existing observations, kitty OSC 21, external color writes, and queried
+  terminal responses. Children: `readable`, `osc21`, `write`, and `query`.
+- **`tipre-terminal-io`** — [shared I/O coordination](../terminal-io/coordination0.gpt6a.md):
+  upstream observation/child-directed injection, ordered outward commands, and
+  query-origin ownership. These shared capabilities keep notification and color
+  implementation independent of the full OSC 7501 responder.
+
 ## Protocol and multiplexer evidence
 
 - [OSC 9;4 and OSC 7501 brief](osc-protocols.glm53m.md) — G research on

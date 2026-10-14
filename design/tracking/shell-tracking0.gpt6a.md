@@ -206,6 +206,11 @@ terminals. Query and DA in the same output read are an important ordering test.
 When tracking support is disabled, preserve the ordinary query/reply path. This
 single-responder behavior is a deliberate extension beyond passive observation.
 
+The [shared terminal-I/O proposal](../terminal-io/coordination0.gpt6a.md)
+(`tipre-terminal-io`) now owns the reusable input/output ordering machinery.
+`tipre-tracking-status-responder` owns the protocol-specific reply semantics;
+notification feedback and color querying use the same I/O surface independently.
+
 Placement determines coverage:
 
 ```text

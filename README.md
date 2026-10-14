@@ -395,6 +395,9 @@ title sequences from the stream byte-for-byte.
 ### Design documents
 
 - [`design/tracking/README.md`](design/tracking/README.md) — shell-local tracking research: OSC progress/activity protocols, tmux handling, and per-shell Kopacetic entities
+- [`design/notifications/notifications0.glm53m.md`](design/notifications/notifications0.glm53m.md) — proposed observation of OSC 9/777 and kitty OSC 99 notifications (`tipre-notifications`)
+- [`design/colors/colors0.glm53m.md`](design/colors/colors0.glm53m.md) — proposed externally readable/writable color state and kitty OSC 21 (`tipre-colors`)
+- [`design/terminal-io/coordination0.gpt6a.md`](design/terminal-io/coordination0.gpt6a.md) — shared reply observation, command injection, and query ownership (`tipre-terminal-io`)
 - [`doc/design/2026-06-08-title-proxy.md`](doc/design/2026-06-08-title-proxy.md) — original MVP design
 - [`doc/design/2026-06-08-child-session-orchestration.md`](doc/design/2026-06-08-child-session-orchestration.md) — ownership refactor and event coordinator
 - [`doc/design/2026-06-22-session-launcher.md`](doc/design/2026-06-22-session-launcher.md) — composable session launching flags
