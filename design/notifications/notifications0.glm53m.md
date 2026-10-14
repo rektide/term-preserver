@@ -8,7 +8,7 @@ author: model:zai-coding-plan/glm-5.3#max
 date: 2026-10-14
 sources:
   - resource: "opencode://ses_ec7f4e3bcffeQTeR4NqyDYJxS7"
-    title: "Commissioned notification design: read vtdn + primary kitty specs, verified against kitty source, drafted proxy design and tickets"
+    title: "Commissioned notification design: read vtdn + primary kitty specs, verified against kitty source, drafted proxy design and tickets; revision 2 applied review corrections (mosh transport, cap accounting, shared-I/O and delivery-evidence boundaries)"
   - resource: "https://vtdn.dev/docs/osc/osc9"
     title: "vtdn OSC 9 page (AI-generated, experimental) — syntax, ConEmu subcommands, terminal support table, read 2026-10-14"
   - resource: "https://vtdn.dev/docs/osc/osc777"
@@ -178,14 +178,21 @@ invisible title re-emit — is a *new interruption event*, not a restore. Any
 explicitly-requested behavior (out of scope here; flagged for the epic).
 
 **Query replies and capability detection.** OSC 99's `p=?` and `p=alive`
-create the same single-responder question already settled for OSC 7501 in
-tracking mode (human-selected: proxy-owned capability replies — see
-[shell-tracking0](../tracking/shell-tracking0.gpt6a.md)). If the proxy
-answers `p=?` itself, it must inject the reply into the stdin relay *and*
-order it before any DA reply it forwards, or a probing child will see the DA
-answer first and conclude "unsupported." The alternative — pass-through with
-reply sniffing — keeps the outer terminal as the single responder. This is a
-scope decision inside the OSC 99 child ticket, not settled by this document.
+queries carry the `i` key — the spec says it exists *for multiplexers*, so a
+middlebox can correlate replies — but correlation is not authorization. The
+proxy-owned capability-reply selection recorded in
+[shell-tracking0](../tracking/shell-tracking0.gpt6a.md) is a **human
+selection for OSC 7501 only**; nothing about it extends to OSC 99. In
+particular, answering `p=alive` or `p=?` from the proxy's derived view would
+advertise *virtual delivery* semantics the human has not accepted, and a
+proxy that answers queries becomes hard to distinguish from a terminal that
+really displays notifications. If the proxy ever answers, the reply must be
+injected into the stdin relay and ordered before any forwarded primary-DA
+reply, or a probing child will conclude "unsupported." Pass-through with
+reply sniffing keeps the outer terminal as the single responder. This is a
+scope decision inside the OSC 99 child ticket, not settled here; the
+record-only observation this design proposes must not be presented as
+evidence of actual OS delivery either way.
 
 **IDs and interactions.** Ids address updates, closes, alive polls, and
 button/activation reports. Chunking means a "notification created" event may
@@ -207,11 +214,13 @@ observation point** this capability needs before any of the reverse channel
 becomes visible to the proxy.
 
 **Backend state vs applied terminal.** What the proxy records is what the
-child *asked for*. Whether the OS showed it, kept it, or silenced it depends
+child *requested*. Whether the OS showed it, kept it, or silenced it depends
 on terminal support (vtdn matrices above), user filters, and focus — none of
-it observable from the PTY→stdout stream alone. Publication should carry the
-event plus a confidence marker (emitted-by-child, report-confirmed, derived),
-never a claim that a toast is on screen.
+it observable from the PTY→stdout stream alone. Record-only observation
+**must not be read as an advertisement or proof of actual OS delivery**;
+publication should carry the event plus a confidence marker
+(emitted-by-child, report-confirmed, derived), never a claim that a toast is
+on screen.
 
 ## Proposed proxy design
 
@@ -222,33 +231,58 @@ never a claim that a toast is on screen.
    check first segment for the ConEmu `digit;` shape (defer to the 9;4 work
    for that branch); OSC 777 → split on `;` into `notify/title/body` with
    missing segments tolerated; OSC 99 → split data at the *first* `;` into
-   metadata (then `:`-split pairs) and payload. Cap, as today, via
-   `TITLE_CAP` — noting 2048/4096-byte chunk limits fit inside it.
-2. **State**: alongside latest-value `ObservedSlots`, a bounded notification
-   log (ring, e.g. 256 events, each `{ts, kind, protocol fields}`) and a
-   derived outstanding-id map for OSC 99 (created/updated on events, removed
-   on `p=close`, annotated on close reports). Snapshots into `SessionExit`.
-   This is deliberately *not* `--reemit-title` state: notifications never
-   re-emit implicitly.
+   metadata (then `:`-split pairs) and payload.
+   **Cap accounting:** the current `TITLE_CAP = 4096` bounds only captured
+   data *after* `ESC ]`, yet a spec-legal OSC 99 chunk may carry up to 4096
+   *encoded payload* bytes **plus** the `99 ;` code, metadata section, and
+   separator — a maximal chunk does not fit and would be discarded whole as
+   overflow today. Notification parsing must size caps against the whole
+   body including framing, and pair per-sequence limits with assembled-text
+   limits per notification id (chunked assembly can otherwise multiply
+   4 KiB chunks without bound), a count bound on tracked ids, and a global
+   memory bound. Terminators are BEL or ST as today.
+2. **State**: alongside latest-value `ObservedSlots`, a **transient,
+   bounded recent-event window** (e.g. ring of N events, each
+   `{ts, kind, protocol fields}`) and a derived outstanding-id map for OSC
+   99 (created/updated on events, removed on `p=close`, annotated on close
+   reports). This is event *observation* for the life of the process —
+   **not an owned durable append-only history**: historical retention is
+   Kopacetic's responsibility per the division already recorded in
+   [shell-tracking0](../tracking/shell-tracking0.gpt6a.md), and eviction
+   from the ring must be presented as lossy. The outstanding-id map
+   *coalesces* by construction — rapid updates under one id retain the
+   latest assembled state, and intermediate events may be dropped under
+   pressure — so consumers must treat both views as best-effort recent
+   observation, not a complete event history. Snapshots into `SessionExit`;
+   deliberately *not* `--reemit-title` state: notifications never re-emit
+   implicitly.
 3. **Delivery unchanged**: default is observe-and-pass-through. Stripping is
    conceivable (a `notify` filter, mirroring title filters) but is not
    proposed now; notifications are out-of-band effects a user opted into.
 4. **Reverse channel (phased)**: phase 1 observes PTY→stdout only. Phase 2
-   adds a stdin-side OSC observer so close/activation reports and query
-   replies annotate the log; the `p=?` single-responder decision (proxy
-   answers vs pass-through) rides on the same stdin injection machinery the
-   7501 responder (`tipre-tracking-status-responder`) will build. Sequencing
-   with that ticket's design is an explicit dependency, not an assumption.
+   uses the shared terminal-I/O capability (parent ticket
+   **`tipre-terminal-io`**: stdin-side observation, serialized injection,
+   and output/query arbitration) so close/activation reports and query
+   replies can annotate the log. The `p=?`/`p=alive` responder decision
+   (proxy answers vs pass-through) is *not* settled by the 7501 selection
+   and must be taken explicitly — including the virtual-delivery concern
+   above — before the proxy ever answers on the terminal's behalf.
 5. **Publication**: notification events are natural Kopacetic entity updates
-   (append + outstanding-set correction), but the publication boundary,
-   entity shape, and shell entry are parent-owned in
+   (bounded recent events + outstanding-set correction), but the publication
+   boundary, entity shape, and shell entry are parent-owned in
    [shell-tracking0](../tracking/shell-tracking0.gpt6a.md) — this design only
-   supplies the event surface. No duplication intended.
-6. **Transport reality**: ssh and mosh are opaque byte pipes. tmux parses OSC
-   and its handling of 9/777/99 is *not retraced here* (9;4 evidence lives in
-   [tmux-osc94](../tracking/tmux-osc94.glm53fx.md); general envelopes in the
-   passthrough ticket). Placement (inside vs outside tmux) is the same
-   coverage decision the tracking epic already records.
+   supplies the event surface, and the proxy's ring is a transient window,
+   not the historical record. No duplication intended.
+6. **Transport reality**: ssh relays bytes opaquely, but **mosh does not** —
+   it runs terminal emulation on both ends and synchronizes screen *state*,
+   so output OSC may be consumed, deduplicated, or replayed rather than
+   byte-relayed; notification observation placement must not assume
+   transparency through mosh. tmux parses OSC as well; its handling of
+   9/777/99 is *not retraced here* (9;4 evidence lives in
+   [tmux-osc94](../tracking/tmux-osc94.glm53fx.md); envelopes and the
+   passthrough ticket qualify further — no new survey). Placement (inside
+   vs outside multiplexer/transport) is the same coverage decision the
+   tracking epic already records.
 
 ## Tickets (pointer, not acceptance)
 
@@ -259,15 +293,17 @@ accurate event/lifecycle model and a phased reverse channel.
 - `tipre-notifications-osc777` — parse and log OSC 777 `notify` events
   (title/body, tolerant arity).
 - `tipre-notifications-osc99` — parse kitty OSC 99 (framing, metadata keys,
-  chunk assembly, ids), maintain the outstanding-id view, decide and document
-  the `p=?`/`p=alive` responder strategy; includes the stdin-side observation
-  point.
+  chunk assembly, ids), maintain the coalesced outstanding-id view, decide
+  and document the `p=?`/`p=alive` responder question against
+  `tipre-terminal-io`; includes stdin-side observation via that shared
+  capability.
 - `tipre-notifications-osc9` — parse and log bare OSC 9 notifications with
   ConEmu subcommand disambiguation (`9;4` stays with the tracking epic).
 
-The event-log surface itself (ring size, snapshot shape, publication fields)
-is epic-level scope; reconnect summaries and notification filtering are
-explicitly out of scope for all of these.
+The event-window surface itself (ring size, snapshot shape, publication
+fields) is epic-level scope; reconnect summaries and notification filtering
+are explicitly out of scope for all of these. The event log is a transient
+recent window — historical retention belongs to Kopacetic, not the proxy.
 
 ## References
 
