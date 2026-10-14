@@ -8,7 +8,7 @@ author: model:zai-coding-plan/glm-5.3#max
 date: 2026-10-14
 sources:
   - resource: "opencode://ses_ec8438a0cffekFPbiWgK70TqvU"
-    title: "Commissioned assessment: read pinned driver source in the cargo registry, archived tursodatabase/turso and turso-docs, crates.io metadata; ran a two-OS-process probe in project scratch; drafted verdict, mixed-mode finding, and handoff"
+    title: "Commissioned assessment: pinned driver source in the cargo registry, archived upstream, crates.io metadata; two-OS-process probe incl. short-lived open-put-drop alternation and bounded overlap retry; verdict, mixed-mode finding, short-lived section, handoff"
   - resource: "file:///home/rektide/src/kopacetic/crates/kopacetic-turso/src/storage/connection.rs"
     title: "Kopacetic open path: turso::Builder::new_local(path).build() with default flags"
   - resource: "file:///home/rektide/src/kopacetic/doc/consumer/term-preserver.md"
@@ -55,10 +55,14 @@ later process fails fast.
   enforces (both below). It is not a configuration flip away.
 
 For the [consumer contract](file:///home/rektide/src/kopacetic/doc/consumer/term-preserver.md)'s
-remaining question — *can direct independent processes write different
-entities in one database file?* — the answer is: **rejected at open by
-default** (before entity semantics matter); **only mechanically possible via
-the experimental flag**, which this pin does not make safe.
+original question — *can direct independent processes write different
+entities in one database file?* — the answer for **long-lived per-proxy
+handles** is: **rejected at open by default** (before entity semantics
+matter); **only mechanically possible via the experimental flag**, which this
+pin does not make safe. The topology correction below adds the shape the
+human actually wants: **short-lived writers** (open → put → drop per
+publication), which the pin *does* support — see
+[Short-lived writers](#short-lived-writers-open--put--drop-across-processes).
 
 ## Two-OS-process probe
 
@@ -80,6 +84,15 @@ benchmarks). Results on the pinned driver, 2026-10-14:
 3. **Both multiprocess** — two processes, disjoint sequential writes, both
    rows persist and are read back. Mechanical capability only; establishes no
    safety on a pin carrying the reader race.
+4. **Short-lived alternation** — two *persistent* OS processes, six
+   open→put→drop publications each into their own entities, strictly
+   alternating; all 12 values intact, both processes alive throughout.
+   Drop — not process exit — releases the lock.
+5. **Bounded overlap retry** — with a child-held store, the parent's open is
+   rejected (control); with a parent-held store, the child's bounded retry
+   observed 15 `LockingError`s over 323 ms, then acquired immediately after
+   the parent dropped, and its value persisted. Final reads went through
+   their own short-lived handles, dropped before reporting.
 
 ## Evidence chain (pinned sources actually read)
 
@@ -114,8 +127,9 @@ benchmarks). Results on the pinned driver, 2026-10-14:
 |---|---|---|
 | Different DB files, one per process | Yes | No sharing to lose — but then there is no shared collection, defeating the goal |
 | Multiple connections in one process | Yes | `Database::open` consults a process-wide registry (keyed by dev/ino); `connect()` yields independent connections over one shared Database/WAL (MVCC machinery present; MVCC↔multiprocess are mutually exclusive, see below) |
-| Cloned stores in one process | Yes | `TursoStore` is `Clone` wrapping `turso::Connection`, whose `Clone` shares one `Arc` connection handle — the workspace README already scopes this as "cloned-store concurrency retain the pinned driver's documented limits" |
-| **Separate processes, same file** | **No — open rejected** | Exclusive `fcntl` lock held from first open to close/exit (evidence above) |
+| Cloned stores in one process | Qualified | `TursoStore` is `Clone` wrapping `turso::Connection`, whose `Clone` shares one `Arc` connection handle — clones are **not** independently safe for concurrent `put` transactions on that shared connection; serialize use (e.g., a single writer task) or open a separately qualified connection. The workspace README already scopes this as "cloned-store concurrency retain the pinned driver's documented limits" |
+| **Separate processes, same file (concurrent)** | **No — open rejected** | Exclusive `fcntl` lock held from first open to close/exit (evidence above) |
+| Separate processes, same file (**short-lived**, non-overlapping) | **Yes** | Drop of all handles releases the lock while the process lives; see [Short-lived writers](#short-lived-writers-open--put--drop-across-processes) — probe phases 4–5 |
 
 In-process double-`open` of the same path additionally cannot collide: the
 registry returns the same `Arc<Database>`, and POSIX `fcntl` locks do not
@@ -154,11 +168,13 @@ doc (current upstream docs, newer than the pin — noted where they diverge):
   `database.rs:1936`; landed 2026-07-13, so it *is* in pre.4).
 - **Platform/filesystem gates**: 64-bit Unix only (Windows/WASM/32-bit accept
   the flag as a no-op); the filesystem reject list includes NFS, CIFS,
-  CephFS, GFS2, Lustre, OCFS2, AFS, CODA, NCP — **and 9P (v9fs)**, notable
-  because a future 9p transport for Kopacetic trees can never host a
-  multiprocess-WAL Turso file. `LIMBO_DISABLE_FILE_LOCK` in the environment
-  silently removes locking entirely (a footgun to name in any deployment
-  doc).
+  CephFS, GFS2, Lustre, OCFS2, AFS, CODA, NCP, and 9P (v9fs) — meaning a
+  database file living on such a filesystem is rejected *for multiprocess-WAL
+  coordination in the inspected mode*. It says nothing about other possible
+  9P integration shapes; the Kopacetic 9P direction (client, server, or OS
+  mount) is still an open selection. `LIMBO_DISABLE_FILE_LOCK` in the
+  environment silently removes locking entirely (a footgun to name in any
+  deployment doc).
 - **Mixed SQLite+Turso processes are unsupported** (`COMPAT.md`).
 - **Cross-process writes serialize on the writer slot regardless** — many
   per-shell processes publishing on every state change would queue on one
@@ -170,6 +186,60 @@ source shape at least through 0.8.1. Moving the pin would remove the race but
 keep the "experimental format" caveat, the MVCC exclusion, and the
 single-writer serialization.
 
+## Short-lived writers: open → put → drop across processes
+
+Topology correction from the human: writers should be **short-lived** — each
+publication opens the store, puts its entity, and drops it — not a long-held
+per-proxy handle. Re-assessed against source and probe (phases 4–5):
+
+**Verdict: supported on this pin, in default mode, without the experimental
+flag.** The exclusive lock becomes the serialization mechanism: each
+publication is one complete store lifetime, overlapping publications fail
+fast with `LockingError`, and a bounded retry acquires as soon as the current
+owner drops. Distinct entities never share a transaction because no two
+stores coexist.
+
+Source chain (all pinned 0.8.0-pre.4):
+
+- **Drop releases the lock while the process lives.** The ownership chain is
+  `TursoStore` → `turso::Connection` (`Arc<TursoConnection>`) → core
+  `Connection` (holds `db: Arc<Database>`) → `db_file` → the sole
+  `UnixFile` fd, whose close releases the process's `fcntl` record lock.
+  Nothing else retains it: `DATABASE_MANAGER` stores `Ready(Weak<Database>)`
+  only (expired weaks are treated as absent and the slot reused), Kopacetic
+  drops the `turso::Database` wrapper right after `connect()`, and the
+  default-features build uses `PlatformIO` (plain fds; no io_uring
+  registrations). Registry keying uses stat-based `file_id` on Unix — no
+  incidental second fd.
+- **POSIX footguns, named.** fcntl locks are per-process (an in-process
+  second open cannot fail — and the registry dedups anyway), and closing
+  *any* fd on a file releases *all* of the process's locks on it. The
+  inspected path holds exactly one fd per `Database`, so the footgun is not
+  live; code that ever opens the DB file a second time in-process would
+  silently strip its own lock on close.
+- **Drop does not checkpoint.** `Drop for Connection` rolls back active
+  transactions, releases WAL read/write locks, and decrements the connection
+  counter — but `checkpoint_shutdown` runs only via explicit
+  `Connection::close()` on the last connection. Committed frames persist in
+  the on-disk `-wal` and every short-lived opener reads them back
+  (cross-process visibility held across all 13 phase-4/5 publications).
+  WAL growth between checkpoints is a monitoring concern, not a correctness
+  one; note Kopacetic's `TursoStore` has no `close()` today, so drop is the
+  only path actually exercised.
+- **Failure behavior is immediate, not busy-waiting.** `open_file` uses
+  non-blocking `F_SETLK`; the `LockingError` arrives instantly. Retry policy
+  (backoff, deadline) is the producer's choice — the probe used 20 ms
+  polling and saw 15 rejections in a 323 ms hold, then immediate
+  acquisition on release.
+
+Caveats: this is strict mutual exclusion at publication granularity — right
+for per-shell latest-state puts, not a throughput path; same-key concurrent
+writers serialize the same way but need their own last-writer-wins policy;
+the `Opening` registry sentinel could stick if an open panicked mid-flight
+(theoretical, not observed across the probe's opens). The qualification
+workload for this topology is tracked in Kopacetic as
+`kop-collections-turso-writers`.
+
 ## Scoped handoff (proportionate to write-first / Caminus-first)
 
 The [consumer contract](file:///home/rektide/src/kopacetic/doc/consumer/term-preserver.md)
@@ -179,17 +249,24 @@ no writer ever prunes another's identity. Proportionate recommendations:
 1. **Primary: Caminus for the shared collection.** The Turso verdict above is
    exactly the backend admitting the wrong kind of contention for that shape:
    per-shell processes must not open one shared SQL file. Kopacetic-caminus
-   is identity-addressed, field-per-file trees with atomic replacement —
-   structurally, each term-preserver process owns *its own entity's files*,
-   so "many processes, disjoint writes, one collection" is the native shape
-   with no coordination lock at all. (Collection-level specifics stay with
-   the parallel Caminus wave; shared entity/API shape with the parent.)
-   This also survives the 9p future, which the Turso multiprocess path
-   structurally cannot (9P is on the coordination reject list).
-2. **Turso stays good for owned single-process use.** One process — a single
-   aggregator, a single proxy owning a subtree, tests — keeps the preferred
-   typed-path backend and its current guarantees unchanged. No re-pin is
-   required for that use; if the pin ever moves for other reasons, prefer
+   is identity-addressed, field-per-file trees — structurally, each
+   term-preserver process owns *its own entity's files*, so "many processes,
+   disjoint writes, one collection" is the native shape with no coordination
+   lock at all. One correction from the companion trace: **the live write
+   chain is not atomic today** — `FilesystemDeser::write` →
+   `serializer.finalize` → `std::fs::write` or `compio_fs::write`
+   truncates in place, and the rooted atomic helpers are present but
+   unwired ([caminus-collections](caminus-collections.glm53fx.md)). So the
+   disjoint-ownership argument stands while *atomic publication at any
+   granularity remains an open capability*, which is exactly what that
+   wave's handoff covers. (Shared entity/API shape stays with the parent.)
+2. **Turso stays good for owned single-process use — and now also for
+   short-lived multi-process publication.** One long-lived owner keeps the
+   preferred typed-path backend unchanged; and per the section above, the
+   corrected open→put→drop topology is supported on this pin without any
+   new service, with the exclusive lock as the serializer and bounded
+   `LockingError` retry as the producer-side admission policy. No re-pin is
+   required for either use; if the pin ever moves for other reasons, prefer
    ≥0.8.0 final for the reader-race fix alone.
 3. **Do not adopt `experimental_multiprocess_wal` for the shell collection**,
    on this pin or merely after a re-pin: it is experimental-format territory,
@@ -197,13 +274,16 @@ no writer ever prunes another's identity. Proportionate recommendations:
    mixed-mode guard does not actually fire through the Rust bindings — one
    stray default-mode opener (a debugging CLI, an older binary) would
    silently coexist with multiprocess openers rather than fail fast.
-4. **No daemon.** The only Turso-faithful shared-file story is single-writer
-   ownership: the fcntl lock elects an owner naturally, and every other
-   process would need to forward writes to whoever holds it — which is a
-   daemon being born and should be named as such if it ever grows. Until
-   someone consciously wants that, per-entity ownership (Caminus) +
-   per-owner Turso gives term-preserver its "one entity per shell, latest
-   state, history elsewhere" story without inventing coordination.
+4. **Shared Turso later is a deliberate design, not a forbidden one.** The
+   chosen Caminus-first path needs no new service, and short-lived writers
+   already give multi-process Turso publication without one. If a
+   *long-lived shared* Turso store is wanted later, the only Turso-faithful
+   shape on this driver is single-writer ownership with the other processes
+   handing writes to the owner — an owner/write-forwarding arrangement that
+   should be designed deliberately in Kopacetic (the human welcomes that
+   handoff; the capability ticket `kop-collections-turso-writers` tracks it)
+   rather than emerging implicitly from whoever happens to hold the fcntl
+   lock.
 5. **For the contract's qualification workload**, run it against Caminus when
    that wave lands; against Turso it can only reproduce phase 1 of the probe
    (second open rejected) — which the scratch probe already demonstrates in
@@ -217,10 +297,12 @@ no writer ever prunes another's identity. Proportionate recommendations:
   `multiprocess_tests.rs`), and `turso_sdk_kit-0.8.0-pre.4` (`src/rsapi.rs`
   open path); `turso_core`/`turso_sdk_kit` 0.8.1 consulted for the
   mixed-mode-probe call-shape comparison.
-- Two-OS-process probe run against the pin 2026-10-14; code and README in
-  gitignored scratch at `.test-agent/turso-multiprocess-probe/` (this
-  repository); no Kopacetic code modified, only consumed as path
-  dependencies.
+- Two-OS-process probe run against the pin 2026-10-14 (phases 1–3) and
+  re-run after the short-lived topology correction (phases 4–5: two
+  long-lived processes driving short-lived stores over a stdin/stdout line
+  protocol); code and README in gitignored scratch at
+  `.test-agent/turso-multiprocess-probe/` (this repository); no Kopacetic
+  code modified, only consumed as path dependencies.
 - Archived upstream: `~/archive/tursodatabase/turso` @ `852e22cf8`
   (2026-10-06): CHANGELOG entries mapped to release dates via git history
   (`50f3a217f` 2026-09-14; MVCC exclusion `7b86d505b` 2026-07-13); COMPAT.md;
