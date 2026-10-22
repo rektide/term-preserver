@@ -1,14 +1,12 @@
-use assert_cmd::cargo::CargoError;
 use assert_cmd::Command;
 
-fn bin() -> Result<assert_cmd::Command, CargoError> {
-    Command::cargo_bin("term-preserver")
+fn bin() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_term-preserver"))
 }
 
 #[test]
 fn pty_relay_passthrough() {
     let output = bin()
-        .unwrap()
         .args(["--", "sh", "-c", "printf hello"])
         .write_stdin("q")
         .output()
@@ -23,7 +21,6 @@ fn pty_relay_passthrough() {
 #[test]
 fn osc_title_passthrough() {
     let output = bin()
-        .unwrap()
         .args(["--", "sh", "-c", "printf '\\033]2;my-title\\007visible'"])
         .write_stdin("q")
         .output()
@@ -42,7 +39,6 @@ fn osc_title_passthrough() {
 #[test]
 fn no_title_reemit_by_default() {
     let output = bin()
-        .unwrap()
         .args(["--", "sh", "-c", "printf '\\033]2;captured\\007done'"])
         .write_stdin("q")
         .output()
@@ -58,7 +54,6 @@ fn no_title_reemit_by_default() {
 #[test]
 fn reemit_title_when_enabled() {
     let output = bin()
-        .unwrap()
         .args([
             "--reemit-title",
             "true",
@@ -83,7 +78,6 @@ fn reemit_restores_icon_and_palette() {
     // OSC 1 (icon) and OSC 4 (palette) should be re-emitted on exit alongside
     // the window title when --reemit-title is set.
     let output = bin()
-        .unwrap()
         .args([
             "--reemit-title",
             "true",
@@ -109,7 +103,6 @@ fn reemit_restores_icon_and_palette() {
 #[test]
 fn print_gone_title_when_enabled() {
     let output = bin()
-        .unwrap()
         .args([
             "--print-gone-title",
             "true",
@@ -135,7 +128,6 @@ fn print_gone_title_when_enabled() {
 #[test]
 fn reemit_restores_fg_bg_cursor() {
     let output = bin()
-        .unwrap()
         .args([
             "--reemit-title",
             "true",
@@ -167,7 +159,6 @@ fn print_gone_title_silent_when_no_title_captured() {
     // With no window title emitted, the gone line should not appear even when
     // the flag is on.
     let output = bin()
-        .unwrap()
         .args(["--print-gone-title", "true", "--", "sh", "-c", "printf hi"])
         .write_stdin("q")
         .output()
