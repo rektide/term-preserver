@@ -25,6 +25,7 @@
 //! - [`proxy`] — the [`proxy::RetryLoop`] orchestrator tying it together.
 
 pub mod color;
+pub mod completion;
 pub mod config;
 pub mod filter;
 pub mod launch;
@@ -37,3 +38,22 @@ pub mod session;
 pub mod signals;
 pub mod terminal;
 pub mod tmux;
+
+/// Shared entry for the `term-preserver` and `tper` binaries: parse, handle
+/// the hidden worker/completion lanes, then run the proxy.
+pub fn bin_entry() -> eyre::Result<()> {
+    use clap::Parser;
+    let cli_args = config::CliArgs::parse();
+    if let Some(request) = &cli_args.launch_worker {
+        return launcher::execute_worker(request);
+    }
+    // The hidden completion lane observes state only; it shares the ordinary
+    // config merge so inventories honor the same root/socket/program layers.
+    let completion = cli_args.completion_candidates;
+    let config = config::load_config(cli_args)?;
+    if let Some(kind) = completion {
+        return kind.run(&config.launch);
+    }
+    let code = proxy::run(config)?;
+    std::process::exit(code);
+}

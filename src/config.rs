@@ -97,6 +97,11 @@ pub struct CliArgs {
     #[arg(long, hide = true, exclusive = true)]
     pub launch_worker: Option<String>,
 
+    /// Read-only shell completion inventory (one name per line). Accepts the
+    /// same lookup options as a launch so a widget can forward its context.
+    #[arg(long, hide = true, value_enum, conflicts_with_all = ["tta", "tmux", "tmux_create", "tmux_attach", "command"])]
+    pub completion_candidates: Option<crate::completion::CompletionCandidates>,
+
     #[arg(long, help = "Enter a matching tta session/project")]
     pub tta: Option<String>,
     #[arg(long, value_enum, help = "Session implementation (auto prefers available tta)")]

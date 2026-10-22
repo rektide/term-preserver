@@ -1,0 +1,83 @@
+#compdef tper term-preserver
+#
+# Live option, session and project completion for term-preserver, typically
+# installed as tper. Candidates come from the binary's hidden read-only
+# --completion-candidates protocol, so they reflect compiled backends, the
+# configured project root, the selected socket and the scaffold registry.
+# Completion never creates, attaches or switches a session, never starts a
+# server, and never runs a scaffold generator.
+
+local curcontext="$curcontext" context state state_descr line ret=1
+local -A opt_args
+local -a query sessions projects expl
+local option program
+
+# Prefer the short alias; fall back to the original binary name so completion
+# also works on source checkouts that only installed term-preserver.
+if (( $+commands[tper] )); then
+  program=tper
+elif (( $+commands[term-preserver] )); then
+  program=term-preserver
+else
+  return ret
+fi
+
+_arguments -s -S -C \
+  '--session-backend=[Session implementation]:backend:->backend' \
+  '--session-root=[tta project root]:project root:_directories' \
+  '--scaffold=-[tta scaffold generator]:generator:->scaffold' \
+  '--tmux-socket=[Explicit tmux socket path]:socket path:_files' \
+  '--tmux-program=[tmux client executable]:executable:_command_names' \
+  '--tta-program=[tta executable for the subprocess backend]:executable:_command_names' \
+  '--tta=[Enter a matching tta session/project]:target:->target' \
+  '--tmux=[Create or attach to tmux session]:target:->target' \
+  '--tmux-create=[Create tmux session]:session:->target' \
+  '--tmux-attach=[Attach to existing tmux session]:session:->target' \
+  '--shell=[Shell to run]:shell:_command_names' \
+  '--ssh=[Connect via SSH]:host:' \
+  '--mosh=[Connect via mosh]:host:' \
+  '--dir=[Working directory for the innermost layer]:directory:_directories' \
+  '--config=[Path to config file]:config:_files' \
+  '--forward-signals=[Signals to forward to child]:signal:' \
+  '--shutdown-signals=[Signals that request proxy shutdown]:signal:' \
+  '--reemit-title=[Re-emit captured title on child exit]:enabled:(true false)' \
+  '--print-gone-title=[Print "gone <title> (pid N)" on child exit]:enabled:(true false)' \
+  '--no-tmux-group[Attach to the existing session instead of joining its group]' \
+  '--no-login[Skip login shell mode]' \
+  '--no-interactive[Skip interactive shell mode]' \
+  '(-h --help)'{-h,--help}'[Show help]' \
+  '(-V --version)'{-V,--version}'[Show version]' && ret=0
+
+if [[ $state == backend ]]; then
+  local -a backends
+  backends=( "${(@f)$(command "$program" --completion-candidates backends 2>/dev/null)}" )
+  backends=( "${(@)backends:#}" )
+  _wanted backends expl 'compiled session backend' compadd -a backends && ret=0
+elif [[ $state == scaffold ]]; then
+  local -a generators
+  generators=( "${(@f)$(command "$program" --completion-candidates scaffolds 2>/dev/null)}" )
+  generators=( "${(@)generators:#}" )
+  _wanted scaffolds expl 'configured scaffold generator' compadd -a generators && ret=0
+elif [[ $state == target ]]; then
+  # Forward only lookup configuration, never an action or the typed fragment.
+  # _arguments accepts both --session-root VALUE and --session-root=VALUE,
+  # including quoting.
+  for option in --session-root --session-backend --tmux-socket --tmux-program --tta-program; do
+    if (( ${+opt_args[$option]} )); then
+      query+=( "$option" "${(Q)opt_args[$option]}" )
+    fi
+  done
+  sessions=( "${(@f)$(command "$program" "${query[@]}" --completion-candidates sessions 2>/dev/null)}" )
+  projects=( "${(@f)$(command "$program" "${query[@]}" --completion-candidates projects 2>/dev/null)}" )
+  sessions=( "${(@)sessions:#}" )
+  projects=( "${(@)projects:#}" )
+
+  # Native Zsh pattern completion replaces a wildcard with the selected literal
+  # name; the matcher also permits fragments anywhere within a name.
+  compstate[pattern_match]='*'
+  compstate[pattern_insert]=menu
+  _wanted sessions expl 'tmux session' compadd -M 'l:|=* r:|=*' -a sessions && ret=0
+  _wanted projects expl 'project directory' compadd -M 'l:|=* r:|=*' -a projects && ret=0
+fi
+
+return ret

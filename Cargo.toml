@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
+# One source, two install names: `tper` (src/bin/tper.rs) is the everyday
+# invocation, and the package's own `term-preserver` binary keeps the original
+# name. `cargo install --path .` installs both.
+
 [dependencies]
 bon = "3.8"
 clap = { version = "4.5", features = ["derive"] }

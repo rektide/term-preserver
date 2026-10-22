@@ -1,14 +1,9 @@
 // pattern: Imperative Shell
 
-use clap::Parser;
-use term_preserver::{config, proxy};
+//! Shared entry for the two binary names. `term-preserver` (src/main.rs) and
+//! `tper` (src/bin/tper.rs) both delegate here; see `src/completion.rs` for
+//! the hidden completion lane.
 
 fn main() -> eyre::Result<()> {
-    let cli_args = config::CliArgs::parse();
-    if let Some(request) = &cli_args.launch_worker {
-        return term_preserver::launcher::execute_worker(request);
-    }
-    let config = config::load_config(cli_args)?;
-    let code = proxy::run(config)?;
-    std::process::exit(code);
+    term_preserver::bin_entry()
 }
