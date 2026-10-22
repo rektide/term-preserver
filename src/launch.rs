@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use crate::launcher::SessionBackend;
 use crate::session::CommandSpec;
 
 use serde::{Deserialize, Serialize};
@@ -59,6 +60,10 @@ pub enum TransportKind {
 pub struct LaunchContext {
     pub tmux_target: Option<TmuxMode>,
     pub transport: TransportKind,
+    pub tmux_program: String,
+    pub tmux_socket: Option<String>,
+    pub native_queries: bool,
+    pub exact_target: bool,
 }
 
 impl LaunchContext {
@@ -74,6 +79,18 @@ impl LaunchContext {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchConfig {
+    #[serde(default)]
+    pub tta: Option<String>,
+    #[serde(default)]
+    pub session_backend: SessionBackend,
+    #[serde(default)]
+    pub session_root: Option<String>,
+    #[serde(default)]
+    pub tmux_socket: Option<String>,
+    #[serde(default = "default_tmux_program")]
+    pub tmux_program: String,
+    #[serde(default = "default_tta_program")]
+    pub tta_program: String,
     #[serde(default)]
     pub shell: Option<String>,
     #[serde(default)]
@@ -104,6 +121,12 @@ pub struct LaunchConfig {
 impl Default for LaunchConfig {
     fn default() -> Self {
         Self {
+            tta: None,
+            session_backend: SessionBackend::Auto,
+            session_root: None,
+            tmux_socket: None,
+            tmux_program: default_tmux_program(),
+            tta_program: default_tta_program(),
             shell: None,
             ssh: None,
             mosh: None,
@@ -116,6 +139,13 @@ impl Default for LaunchConfig {
             interactive: default_launch_interactive(),
         }
     }
+}
+
+fn default_tmux_program() -> String {
+    "tmux".into()
+}
+fn default_tta_program() -> String {
+    "tta".into()
 }
 
 fn default_launch_tmux_group() -> bool {
@@ -131,11 +161,7 @@ fn default_launch_interactive() -> bool {
 }
 
 fn shell_basename(path: &str) -> String {
-    Path::new(path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(path)
-        .to_string()
+    Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or(path).to_string()
 }
 
 fn detect_shell_family(name: &str) -> ShellFamily {
@@ -156,12 +182,7 @@ fn build_flags_string(login: bool, interactive: bool) -> String {
     }
 }
 
-fn build_fallback_snippet(
-    login: bool,
-    interactive: bool,
-    inner: Option<&InnerJob>,
-    dir: Option<&str>,
-) -> Vec<String> {
+fn build_fallback_snippet(login: bool, interactive: bool, inner: Option<&InnerJob>, dir: Option<&str>) -> Vec<String> {
     let flags = build_flags_string(login, interactive);
     let cd_prefix = match dir {
         Some(d) => format!("cd {d} && "),
@@ -287,11 +308,7 @@ fn fish_grouped_script(session: &str, satellite: &str, primary: &str) -> String 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum InnerJob {
     Plain(String),
-    Grouped {
-        primary: String,
-        satellite: String,
-        session: String,
-    },
+    Grouped { primary: String, satellite: String, session: String },
 }
 
 impl InnerJob {
@@ -326,13 +343,7 @@ fn resolve_inner_command(launch: &LaunchConfig, trailing: &[String]) -> Option<I
     None
 }
 
-fn build_shell_invocation(
-    shell: &ShellResolution,
-    inner: Option<&InnerJob>,
-    dir: Option<&str>,
-    login: bool,
-    interactive: bool,
-) -> Vec<String> {
+fn build_shell_invocation(shell: &ShellResolution, inner: Option<&InnerJob>, dir: Option<&str>, login: bool, interactive: bool) -> Vec<String> {
     if shell.is_fallback {
         return build_fallback_snippet(login, interactive, inner, dir);
     }
@@ -344,11 +355,7 @@ fn build_shell_invocation(
     fn inner_script(job: &InnerJob, family: ShellFamily) -> String {
         match job {
             InnerJob::Plain(cmd) => format!("exec {cmd}"),
-            InnerJob::Grouped {
-                primary,
-                satellite,
-                session,
-            } => match family {
+            InnerJob::Grouped { primary, satellite, session } => match family {
                 ShellFamily::Posix => posix_grouped_script(session, satellite, primary),
                 ShellFamily::Fish => fish_grouped_script(session, satellite, primary),
                 ShellFamily::Nushell => format!("exec {}", job.plain()),
@@ -386,14 +393,8 @@ fn build_shell_invocation(
             let c_arg = match (inner, dir) {
                 (None, None) => None,
                 (Some(job), None) => Some(inner_script(job, shell.family)),
-                (None, Some(d)) => Some(format!(
-                    "cd {d} && exec {name} {flags}",
-                    name = shell.name,
-                    flags = flags
-                )),
-                (Some(job), Some(d)) => {
-                    Some(format!("cd {d} && {}", inner_script(job, shell.family)))
-                }
+                (None, Some(d)) => Some(format!("cd {d} && exec {name} {flags}", name = shell.name, flags = flags)),
+                (Some(job), Some(d)) => Some(format!("cd {d} && {}", inner_script(job, shell.family))),
             };
 
             // The `(None, Some(dir))` arm re-execs the same shell with `{flags}`
@@ -401,11 +402,7 @@ fn build_shell_invocation(
             // source login/rc files twice. Suppress the outer flags there; every
             // other arm needs them so the pre-exec environment is set up once.
             let suppress_outer_flags = matches!((inner, dir), (None, Some(_)));
-            let outer_flags = if suppress_outer_flags {
-                String::new()
-            } else {
-                flags
-            };
+            let outer_flags = if suppress_outer_flags { String::new() } else { flags };
 
             match c_arg {
                 Some(c_arg) => {
@@ -428,11 +425,8 @@ fn build_shell_invocation(
 
 /// Single-quote a token for a POSIX shell, leaving already-safe tokens bare.
 /// Embedded single quotes become the standard `'\''` escape.
-fn shell_quote(arg: &str) -> String {
-    let is_safe = !arg.is_empty()
-        && arg
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_./:=@,+".contains(c));
+pub(crate) fn shell_quote(arg: &str) -> String {
+    let is_safe = !arg.is_empty() && arg.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:=@,+".contains(c));
     if is_safe {
         arg.to_string()
     } else {
@@ -442,14 +436,11 @@ fn shell_quote(arg: &str) -> String {
 
 /// Join an argv into one shell-quoted command line that survives being
 /// re-split by a remote shell (ssh concatenates and re-parses the command).
-fn shell_join(args: &[String]) -> String {
-    args.iter()
-        .map(|a| shell_quote(a))
-        .collect::<Vec<_>>()
-        .join(" ")
+pub(crate) fn shell_join(args: &[String]) -> String {
+    args.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ")
 }
 
-fn wrap_transport(cmd: Vec<String>, ssh: Option<&str>, mosh: Option<&str>) -> Vec<String> {
+pub(crate) fn wrap_transport(cmd: Vec<String>, ssh: Option<&str>, mosh: Option<&str>) -> Vec<String> {
     if let Some(host) = ssh {
         // `-t` forces remote PTY allocation: ssh disables the remote tty whenever
         // a command is given (we always give one), and without it an interactive
@@ -474,6 +465,9 @@ fn wrap_transport(cmd: Vec<String>, ssh: Option<&str>, mosh: Option<&str>) -> Ve
 
 impl LaunchConfig {
     pub fn tmux_mode(&self) -> Option<TmuxMode> {
+        if let Some(ref s) = self.tta {
+            return Some(TmuxMode::CreateOrAttach(s.clone()));
+        }
         if let Some(ref s) = self.tmux {
             return Some(TmuxMode::CreateOrAttach(s.clone()));
         }
@@ -508,20 +502,28 @@ impl LaunchConfig {
         LaunchContext {
             tmux_target: self.tmux_mode(),
             transport,
+            tmux_program: self.tmux_program.clone(),
+            tmux_socket: self.tmux_socket.clone(),
+            native_queries: matches!(self.session_backend, SessionBackend::TtaLib | SessionBackend::ClassicTmuxTmax)
+                || (self.session_backend == SessionBackend::Auto && cfg!(feature = "tta-lib")),
+            exact_target: self.tta.is_none()
+                && (self.tmux_create.is_some()
+                    || self.tmux_attach.is_some()
+                    || matches!(self.session_backend, SessionBackend::ClassicTmuxCli | SessionBackend::ClassicTmuxTmax)),
         }
     }
 
-    fn validate(&self) -> eyre::Result<()> {
+    pub(crate) fn validate(&self) -> eyre::Result<()> {
         if self.ssh.is_some() && self.mosh.is_some() {
             eyre::bail!("--ssh and --mosh are mutually exclusive");
         }
 
-        let tmux_count = [&self.tmux, &self.tmux_create, &self.tmux_attach]
+        let tmux_count = [&self.tta, &self.tmux, &self.tmux_create, &self.tmux_attach]
             .iter()
             .filter(|o| o.is_some())
             .count();
         if tmux_count > 1 {
-            eyre::bail!("--tmux, --tmux-create, and --tmux-attach are mutually exclusive");
+            eyre::bail!("--tta, --tmux, --tmux-create, and --tmux-attach are mutually exclusive");
         }
 
         Ok(())
@@ -530,34 +532,23 @@ impl LaunchConfig {
     /// `env_shell` is the caller's `$SHELL` (read in the imperative shell), used
     /// only when neither `--shell` nor a config shell is set. Passing it in keeps
     /// this resolution pipeline pure and deterministic in tests.
-    pub fn resolve(
-        &self,
-        trailing: &[String],
-        env_shell: Option<&str>,
-    ) -> eyre::Result<CommandSpec> {
+    pub fn resolve(&self, trailing: &[String], env_shell: Option<&str>) -> eyre::Result<CommandSpec> {
         self.validate()?;
+        if self.tmux_mode().is_some() && !cfg!(feature = "classic-tmux-cli") {
+            eyre::bail!("classic tmux CLI launching was not compiled; use launcher::prepare for backend selection");
+        }
 
         let shell = resolve_shell(self, env_shell);
         let inner = resolve_inner_command(self, trailing);
-        let dir_for_shell = if self.tmux_mode().is_some() {
-            None
-        } else {
-            self.dir.as_deref()
-        };
-        let shell_cmd = build_shell_invocation(
-            &shell,
-            inner.as_ref(),
-            dir_for_shell,
-            self.login,
-            self.interactive,
-        );
+        let dir_for_shell = if self.tmux_mode().is_some() { None } else { self.dir.as_deref() };
+        let shell_cmd = build_shell_invocation(&shell, inner.as_ref(), dir_for_shell, self.login, self.interactive);
         let full_cmd = wrap_transport(shell_cmd, self.ssh.as_deref(), self.mosh.as_deref());
 
         CommandSpec::try_from(full_cmd)
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "classic-tmux-cli"))]
 mod tests {
     use super::*;
 
@@ -573,6 +564,7 @@ mod tests {
             tmux_group: true,
             login: true,
             interactive: true,
+            ..LaunchConfig::default()
         }
     }
 
@@ -664,13 +656,7 @@ mod tests {
             family: ShellFamily::Posix,
             is_fallback: false,
         };
-        let cmd = build_shell_invocation(
-            &shell,
-            Some(&InnerJob::Plain("tmux new -As dev".into())),
-            None,
-            true,
-            true,
-        );
+        let cmd = build_shell_invocation(&shell, Some(&InnerJob::Plain("tmux new -As dev".into())), None, true, true);
         assert_eq!(cmd, vec!["zsh", "-li", "-c", "exec tmux new -As dev"]);
     }
 
@@ -692,13 +678,7 @@ mod tests {
             family: ShellFamily::Posix,
             is_fallback: false,
         };
-        let cmd = build_shell_invocation(
-            &shell,
-            Some(&InnerJob::Plain("echo hi".into())),
-            None,
-            true,
-            false,
-        );
+        let cmd = build_shell_invocation(&shell, Some(&InnerJob::Plain("echo hi".into())), None, true, false);
         assert_eq!(cmd, vec!["zsh", "-l", "-c", "exec echo hi"]);
     }
 
@@ -722,13 +702,7 @@ mod tests {
             family: ShellFamily::Nushell,
             is_fallback: false,
         };
-        let cmd = build_shell_invocation(
-            &shell,
-            Some(&InnerJob::Plain("tmux new -As dev".into())),
-            None,
-            true,
-            true,
-        );
+        let cmd = build_shell_invocation(&shell, Some(&InnerJob::Plain("tmux new -As dev".into())), None, true, true);
         assert_eq!(cmd, vec!["nu", "-c", "tmux new -As dev"]);
     }
 
@@ -752,13 +726,7 @@ mod tests {
             family: ShellFamily::Fish,
             is_fallback: false,
         };
-        let cmd = build_shell_invocation(
-            &shell,
-            Some(&InnerJob::Plain("tmux new -As dev".into())),
-            None,
-            true,
-            true,
-        );
+        let cmd = build_shell_invocation(&shell, Some(&InnerJob::Plain("tmux new -As dev".into())), None, true, true);
         assert_eq!(cmd, vec!["fish", "-li", "-c", "exec tmux new -As dev"]);
     }
 
@@ -782,17 +750,8 @@ mod tests {
             family: ShellFamily::Posix,
             is_fallback: false,
         };
-        let cmd = build_shell_invocation(
-            &shell,
-            Some(&InnerJob::Plain("make test".into())),
-            Some("~/src/foo"),
-            true,
-            true,
-        );
-        assert_eq!(
-            cmd,
-            vec!["zsh", "-li", "-c", "cd ~/src/foo && exec make test"]
-        );
+        let cmd = build_shell_invocation(&shell, Some(&InnerJob::Plain("make test".into())), Some("~/src/foo"), true, true);
+        assert_eq!(cmd, vec!["zsh", "-li", "-c", "cd ~/src/foo && exec make test"]);
     }
 
     #[test]
@@ -820,12 +779,7 @@ mod tests {
 
     #[test]
     fn fallback_with_inner() {
-        let cmd = build_fallback_snippet(
-            true,
-            true,
-            Some(&InnerJob::Plain("tmux new -As dev".into())),
-            None,
-        );
+        let cmd = build_fallback_snippet(true, true, Some(&InnerJob::Plain("tmux new -As dev".into())), None);
         assert!(cmd[2].contains("exec tmux new -As dev"));
     }
 
@@ -852,37 +806,25 @@ mod tests {
     #[test]
     fn tmux_attach() {
         let mode = TmuxMode::Attach("dev".into());
-        assert_eq!(
-            build_tmux_command(&mode, None, &[]),
-            "tmux attach-session -t dev"
-        );
+        assert_eq!(build_tmux_command(&mode, None, &[]), "tmux attach-session -t dev");
     }
 
     #[test]
     fn tmux_with_dir() {
         let mode = TmuxMode::CreateOrAttach("dev".into());
-        assert_eq!(
-            build_tmux_command(&mode, Some("~/src/foo"), &[]),
-            "tmux new -c ~/src/foo -As dev"
-        );
+        assert_eq!(build_tmux_command(&mode, Some("~/src/foo"), &[]), "tmux new -c ~/src/foo -As dev");
     }
 
     #[test]
     fn tmux_with_trailing() {
         let mode = TmuxMode::CreateOrAttach("dev".into());
-        assert_eq!(
-            build_tmux_command(&mode, None, &["vim".into()]),
-            "tmux new -As dev vim"
-        );
+        assert_eq!(build_tmux_command(&mode, None, &["vim".into()]), "tmux new -As dev vim");
     }
 
     #[test]
     fn tmux_attach_with_dir() {
         let mode = TmuxMode::Attach("dev".into());
-        assert_eq!(
-            build_tmux_command(&mode, Some("~/foo"), &[]),
-            "tmux attach-session -c ~/foo -t dev"
-        );
+        assert_eq!(build_tmux_command(&mode, Some("~/foo"), &[]), "tmux attach-session -c ~/foo -t dev");
     }
 
     // --- grouped satellites ---
@@ -890,10 +832,7 @@ mod tests {
     #[test]
     fn satellite_command() {
         let mode = TmuxMode::CreateOrAttach("dev".into());
-        assert_eq!(
-            build_satellite_command(&mode, None),
-            r"tmux new -t dev \; set destroy-unattached keep-last"
-        );
+        assert_eq!(build_satellite_command(&mode, None), r"tmux new -t dev \; set destroy-unattached keep-last");
     }
 
     #[test]
@@ -907,11 +846,7 @@ mod tests {
 
     #[test]
     fn posix_grouped_script_exact_match_probe() {
-        let script = posix_grouped_script(
-            "dev",
-            r"tmux new -t dev \; set destroy-unattached keep-last",
-            "tmux new -As dev",
-        );
+        let script = posix_grouped_script("dev", r"tmux new -t dev \; set destroy-unattached keep-last", "tmux new -As dev");
         assert_eq!(
             script,
             "if tmux has-session -t '=dev' 2>/dev/null; \
@@ -1024,22 +959,14 @@ mod tests {
 
     #[test]
     fn shell_quote_wraps_spaces_and_specials() {
-        assert_eq!(
-            shell_quote("exec tmux new -As dev"),
-            "'exec tmux new -As dev'"
-        );
+        assert_eq!(shell_quote("exec tmux new -As dev"), "'exec tmux new -As dev'");
         assert_eq!(shell_quote(""), "''");
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
     }
 
     #[test]
     fn shell_join_quotes_each_token() {
-        let joined = shell_join(&[
-            "zsh".into(),
-            "-li".into(),
-            "-c".into(),
-            "exec tmux new -As dev".into(),
-        ]);
+        let joined = shell_join(&["zsh".into(), "-li".into(), "-c".into(), "exec tmux new -As dev".into()]);
         assert_eq!(joined, "zsh -li -c 'exec tmux new -As dev'");
     }
 
@@ -1126,10 +1053,7 @@ mod tests {
         l.tmux = Some("dev".into());
         let ctx = l.context();
         assert_eq!(ctx.transport, TransportKind::Local);
-        assert_eq!(
-            ctx.local_tmux_target(),
-            Some(&TmuxMode::CreateOrAttach("dev".into()))
-        );
+        assert_eq!(ctx.local_tmux_target(), Some(&TmuxMode::CreateOrAttach("dev".into())));
     }
 
     #[test]
@@ -1211,10 +1135,7 @@ mod tests {
         l.tmux = Some("compfuzor".into());
         let spec = l.resolve(&[], None).unwrap();
         assert_eq!(spec.program, "mosh");
-        assert_eq!(
-            spec.args,
-            vec!["w", "--", "nu", "-c", "tmux new -As compfuzor"]
-        );
+        assert_eq!(spec.args, vec!["w", "--", "nu", "-c", "tmux new -As compfuzor"]);
     }
 
     #[test]
@@ -1230,10 +1151,7 @@ mod tests {
         let mut l = launch_with_shell("zsh");
         l.tmux_attach = Some("dev".into());
         let spec = l.resolve(&[], None).unwrap();
-        assert_eq!(
-            spec.args,
-            vec!["-li", "-c", "exec tmux attach-session -t dev"]
-        );
+        assert_eq!(spec.args, vec!["-li", "-c", "exec tmux attach-session -t dev"]);
     }
 
     #[test]
@@ -1273,10 +1191,7 @@ mod tests {
         l.dir = Some("~/src/foo".into());
         let spec = l.resolve(&["make".into(), "test".into()], None).unwrap();
         assert_eq!(spec.program, "zsh");
-        assert_eq!(
-            spec.args,
-            vec!["-li", "-c", "cd ~/src/foo && exec make test"]
-        );
+        assert_eq!(spec.args, vec!["-li", "-c", "cd ~/src/foo && exec make test"]);
     }
 
     #[test]

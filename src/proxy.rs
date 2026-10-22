@@ -31,14 +31,7 @@ pub struct RetryLoop {
 }
 
 impl RetryLoop {
-    pub fn new(
-        command: CommandSpec,
-        reemit_title: bool,
-        print_gone_title: bool,
-        filters: Arc<FilterSet>,
-        launch_ctx: LaunchContext,
-        tmux: TmuxConfig,
-    ) -> Self {
+    pub fn new(command: CommandSpec, reemit_title: bool, print_gone_title: bool, filters: Arc<FilterSet>, launch_ctx: LaunchContext, tmux: TmuxConfig) -> Self {
         Self {
             command,
             prompt_policy: PromptPolicy,
@@ -56,13 +49,7 @@ impl RetryLoop {
                 return Ok(reason.exit_code());
             }
 
-            let exit = ChildSession::run(
-                self.command.clone(),
-                runtime,
-                self.filters.clone(),
-                self.launch_ctx.clone(),
-                self.tmux.clone(),
-            )?;
+            let exit = ChildSession::run(self.command.clone(), runtime, self.filters.clone(), self.launch_ctx.clone(), self.tmux.clone())?;
             runtime.record_event(ProxyEvent::ChildExited(Box::new(SessionExit {
                 command: exit.command.clone(),
                 exit_code: exit.exit_code,
@@ -113,9 +100,7 @@ impl RetryLoop {
         // Visible record: print "gone <title> (pid N)" so the user can see what
         // the exiting process owned. Orthogonal to the invisible re-emit above.
         if self.print_gone_title {
-            if let Some(line) =
-                prompt::format_gone_line(&exit.observed, exit.child_pid, exit.tmux.as_ref())
-            {
+            if let Some(line) = prompt::format_gone_line(&exit.observed, exit.child_pid, exit.tmux.as_ref()) {
                 io::stdout().write_all(line.as_bytes())?;
                 io::stdout().flush()?;
             }
@@ -131,10 +116,7 @@ impl RetryLoop {
 fn read_prompt_input(runtime: &mut ProxyRuntime) -> eyre::Result<PromptInput> {
     let _ = runtime.drain_events();
     let stdin_borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(io::stdin().as_raw_fd()) };
-    let mut fds = [nix::poll::PollFd::new(
-        stdin_borrowed,
-        nix::poll::PollFlags::POLLIN,
-    )];
+    let mut fds = [nix::poll::PollFd::new(stdin_borrowed, nix::poll::PollFlags::POLLIN)];
     match nix::poll::poll(&mut fds, 100u16) {
         Ok(0) => return Ok(PromptInput::Timeout),
         Ok(_) => {}
@@ -153,28 +135,21 @@ fn read_prompt_input(runtime: &mut ProxyRuntime) -> eyre::Result<PromptInput> {
 }
 
 pub fn run(config: Config) -> eyre::Result<i32> {
-    let launch_ctx = config.launch.context();
+    let mut launch = config.launch.clone();
+    crate::launcher::normalize_local(&mut launch)?;
+    let launch_ctx = launch.context();
     let tmux = config.tmux.clone();
-    let command = if config.launch.is_active() {
+    let command = if launch.is_active() {
         let env_shell = std::env::var("SHELL").ok();
-        config
-            .launch
-            .resolve(&config.command, env_shell.as_deref())?
+        crate::launcher::prepare(&launch, &config.command, env_shell.as_deref())?
+    } else if config.command.is_empty() {
+        CommandSpec::try_from(vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())])?
     } else {
         CommandSpec::try_from(config.command.clone())?
     };
     let signal_policy = SignalPolicy::from_config(&config).wrap_err("parsing signal policy")?;
-    let filters = Arc::new(
-        FilterSet::compile(&config.title_filters).wrap_err("compiling title filters")?,
-    );
+    let filters = Arc::new(FilterSet::compile(&config.title_filters).wrap_err("compiling title filters")?);
     let mut runtime = ProxyRuntime::enter(&signal_policy)?;
-    let mut retry_loop = RetryLoop::new(
-        command,
-        config.reemit_title,
-        config.print_gone_title,
-        filters,
-        launch_ctx,
-        tmux,
-    );
+    let mut retry_loop = RetryLoop::new(command, config.reemit_title, config.print_gone_title, filters, launch_ctx, tmux);
     retry_loop.run(&mut runtime)
 }

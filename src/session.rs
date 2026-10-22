@@ -124,10 +124,7 @@ impl ObservedState {
     }
 
     pub fn snapshot(&self) -> ObservedSlots {
-        self.inner
-            .lock()
-            .map(|guard| guard.clone())
-            .unwrap_or_default()
+        self.inner.lock().map(|guard| guard.clone()).unwrap_or_default()
     }
 }
 
@@ -304,11 +301,7 @@ pub fn copy_pty_to_stdout_with_titles<R: Read, W: Write>(
     }
 }
 
-pub fn copy_stdin_to_pty_until_cancelled<W: Write>(
-    stdin_fd: std::os::fd::RawFd,
-    pty_writer: &mut W,
-    child_alive: &Arc<AtomicBool>,
-) -> io::Result<u64> {
+pub fn copy_stdin_to_pty_until_cancelled<W: Write>(stdin_fd: std::os::fd::RawFd, pty_writer: &mut W, child_alive: &Arc<AtomicBool>) -> io::Result<u64> {
     let mut buf = [0u8; BUF_SIZE];
     let mut total: u64 = 0;
     loop {
@@ -317,10 +310,7 @@ pub fn copy_stdin_to_pty_until_cancelled<W: Write>(
         }
 
         let stdin_borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(stdin_fd) };
-        let mut fds = [nix::poll::PollFd::new(
-            stdin_borrowed,
-            nix::poll::PollFlags::POLLIN,
-        )];
+        let mut fds = [nix::poll::PollFd::new(stdin_borrowed, nix::poll::PollFlags::POLLIN)];
         match nix::poll::poll(&mut fds, 100u16) {
             Ok(0) => continue,
             Ok(_) => {}
@@ -409,10 +399,7 @@ impl RelayThreads {
             Err(_) => RelayEnd::Panicked,
         };
 
-        Ok(RelayJoinReport {
-            stdin_to_pty,
-            pty_to_stdout,
-        })
+        Ok(RelayJoinReport { stdin_to_pty, pty_to_stdout })
     }
 }
 
@@ -434,12 +421,8 @@ pub struct ResizeForwarder {
 }
 
 impl ResizeForwarder {
-    fn start(
-        pty_resize_fd: std::os::fd::RawFd,
-        child_alive: Arc<AtomicBool>,
-    ) -> eyre::Result<Self> {
-        let mut winch = signal_hook::iterator::Signals::new([signal_hook::consts::SIGWINCH])
-            .wrap_err("registering SIGWINCH handler")?;
+    fn start(pty_resize_fd: std::os::fd::RawFd, child_alive: Arc<AtomicBool>) -> eyre::Result<Self> {
+        let mut winch = signal_hook::iterator::Signals::new([signal_hook::consts::SIGWINCH]).wrap_err("registering SIGWINCH handler")?;
         let alive_for_resize = child_alive.clone();
         let handle = thread::spawn(move || {
             let pty_file = unsafe { std::fs::File::from_raw_fd(pty_resize_fd) };
@@ -458,10 +441,7 @@ impl ResizeForwarder {
                 thread::sleep(Duration::from_millis(100));
             }
         });
-        Ok(Self {
-            child_alive,
-            handle,
-        })
+        Ok(Self { child_alive, handle })
     }
 
     fn stop(self) {
@@ -493,17 +473,10 @@ pub struct ChildSession {
 }
 
 impl ChildSession {
-    pub fn spawn(
-        command: CommandSpec,
-        runtime: &ProxyRuntime,
-        filters: Arc<FilterSet>,
-        launch_ctx: LaunchContext,
-        tmux_cfg: TmuxConfig,
-    ) -> eyre::Result<Self> {
+    pub fn spawn(command: CommandSpec, runtime: &ProxyRuntime, filters: Arc<FilterSet>, launch_ctx: LaunchContext, tmux_cfg: TmuxConfig) -> eyre::Result<Self> {
         let (pty, pts) = pty_process::blocking::open().wrap_err("opening PTY")?;
 
-        let size = terminal::terminal_size(&io::stdout())
-            .unwrap_or_else(|_| pty_process::Size::new(24, 80));
+        let size = terminal::terminal_size(&io::stdout()).unwrap_or_else(|_| pty_process::Size::new(24, 80));
         pty.resize(size).wrap_err("resizing PTY")?;
 
         let child = pty_process::blocking::Command::new(&command.program)
@@ -523,14 +496,7 @@ impl ChildSession {
         let child_pid = child.id();
         let signal = SignalForwarder::start(runtime, child_pid);
         let resize = ResizeForwarder::start(pty_resize_fd, child_alive.clone())?;
-        let relays = RelayThreads::start(
-            stdin_fd,
-            pty_write_fd,
-            pty_read_fd,
-            child_alive.clone(),
-            observed_state.clone(),
-            filters,
-        );
+        let relays = RelayThreads::start(stdin_fd, pty_write_fd, pty_read_fd, child_alive.clone(), observed_state.clone(), filters);
 
         // Only a local tmux server is reachable by the local `tmux` binary, so
         // the sampler runs exclusively for local tmux targets. It correlates the
@@ -539,11 +505,20 @@ impl ChildSession {
         let (tmux_state, tmux_sampler) = match launch_ctx.local_tmux_target() {
             Some(target) if tmux_cfg.enabled(TmuxSource::Poll) => {
                 let state = TmuxState::new();
-                let sampler = TmuxSampler::start(
+                let sampler = TmuxSampler::start_at(
                     child_pid,
-                    target.clone(),
+                    launch_ctx.exact_target.then(|| target.clone()),
                     child_alive.clone(),
                     state.clone(),
+                    crate::tmux::TmuxEndpoint {
+                        program: launch_ctx.tmux_program.clone(),
+                        socket: launch_ctx.tmux_socket.clone(),
+                        backend: if launch_ctx.native_queries {
+                            crate::tmux::QueryBackend::Tmax
+                        } else {
+                            crate::tmux::QueryBackend::Cli
+                        },
+                    },
                 );
                 (Some(state), Some(sampler))
             }
@@ -556,10 +531,7 @@ impl ChildSession {
             observed_state,
             child_alive,
             relays,
-            forwarders: SessionForwarders {
-                _signal: signal,
-                resize,
-            },
+            forwarders: SessionForwarders { _signal: signal, resize },
             tmux_state,
             tmux_sampler,
         })
@@ -667,13 +639,7 @@ mod tests {
         let mut reader = Cursor::new(input.to_vec());
         let mut writer = Vec::new();
         let state = ObservedState::new();
-        let _ = copy_pty_to_stdout_with_titles(
-            &mut reader,
-            &mut writer,
-            state.clone(),
-            Arc::new(filters.clone()),
-        )
-        .unwrap();
+        let _ = copy_pty_to_stdout_with_titles(&mut reader, &mut writer, state.clone(), Arc::new(filters.clone())).unwrap();
         (writer, state.snapshot())
     }
 
@@ -702,11 +668,7 @@ mod tests {
         let filters = FilterSet::compile(&[rule("^rektide@", true, false)]).unwrap();
         let (out, slots) = run_relay(b"\x1b]2;rektide@host\x07tail", &filters);
         assert_eq!(&out, b"tail", "OSC bytes must be stripped from stream");
-        assert_eq!(
-            slots.window_title.as_deref(),
-            Some("rektide@host"),
-            "ignore=false must still record the title"
-        );
+        assert_eq!(slots.window_title.as_deref(), Some("rektide@host"), "ignore=false must still record the title");
     }
 
     #[test]
@@ -723,11 +685,7 @@ mod tests {
     fn ignore_keeps_sequence_but_skips_state() {
         let filters = FilterSet::compile(&[rule("^rektide@", false, true)]).unwrap();
         let (out, slots) = run_relay(b"\x1b]2;rektide@host\x07tail", &filters);
-        assert_eq!(
-            &out,
-            b"\x1b]2;rektide@host\x07tail",
-            "OSC bytes must pass through under ignore-only"
-        );
+        assert_eq!(&out, b"\x1b]2;rektide@host\x07tail", "OSC bytes must pass through under ignore-only");
         assert!(slots.window_title.is_none(), "title state must not record ignored title");
     }
 
@@ -754,11 +712,7 @@ mod tests {
     #[test]
     #[cfg(feature = "regex")]
     fn strip_and_ignore_combine_across_rules() {
-        let filters = FilterSet::compile(&[
-            rule("^rektide@", true, false),
-            rule("@host$", false, true),
-        ])
-        .unwrap();
+        let filters = FilterSet::compile(&[rule("^rektide@", true, false), rule("@host$", false, true)]).unwrap();
         let (out, slots) = run_relay(b"\x1b]2;rektide@host\x07", &filters);
         assert!(out.is_empty(), "combined strip must drop the sequence");
         assert!(slots.window_title.is_none(), "combined ignore must skip the state");
@@ -793,10 +747,7 @@ mod tests {
     #[test]
     fn special_colors_and_resets_recorded_at_relay() {
         let filters = FilterSet::empty();
-        let (_out, slots) = run_relay(
-            b"\x1b]5;1;#aabbcc\x07\x1b]4;0;rgb:00/00/00\x07",
-            &filters,
-        );
+        let (_out, slots) = run_relay(b"\x1b]5;1;#aabbcc\x07\x1b]4;0;rgb:00/00/00\x07", &filters);
         assert_eq!(slots.special.get(&1).map(|c| c.rgb), Some(Some([0xaa, 0xbb, 0xcc])));
         assert_eq!(slots.palette.get(&0).map(|c| c.rgb), Some(Some([0, 0, 0])));
 

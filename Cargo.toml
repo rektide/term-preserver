@@ -9,15 +9,26 @@ bon = "3.8"
 clap = { version = "4.5", features = ["derive"] }
 eyre = "0.6"
 figment2 = { version = "0.11.5", features = ["toml"] }
-nix = { version = "0.31", features = ["ioctl", "poll", "process", "signal", "term"] }
+nix = { version = "0.31", features = ["ioctl", "poll", "process", "signal", "term", "user"] }
 pty-process = "0.5.3"
 regex = { version = "1", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 signal-hook = "0.3"
+tmax = { path = "../tmux-interface-control", default-features = false, features = ["client"], optional = true }
+tta-launcher = { path = "../tta/session/launcher", default-features = false, features = ["native", "cli"], optional = true }
+tta-command = { path = "../tta/shell/command", optional = true }
 
 [features]
-default = ["regex", "tmux"]
+default = ["regex", "tmux", "tta-cli", "classic-tmux-cli"]
+## Prefer tta when its executable is present on the execution host.
+tta-cli = []
+## Embed the sibling tta launcher; no installed tta executable is needed.
+tta-lib = ["dep:tta-launcher", "dep:tta-command", "dep:tmax"]
+## Classic exact-name tmux launching can be omitted independently of observation.
+classic-tmux = []
+classic-tmux-cli = ["classic-tmux"]
+classic-tmux-tmax = ["classic-tmux", "dep:tmax"]
 ## Enable regex-based title filtering (`title_filters`). Without this feature,
 ## `FilterSet` compiles to a no-op: configured rules are accepted but ignored.
 regex = ["dep:regex"]

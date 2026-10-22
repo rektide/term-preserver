@@ -28,6 +28,7 @@ pub mod color;
 pub mod config;
 pub mod filter;
 pub mod launch;
+pub mod launcher;
 pub mod osc;
 pub mod prompt;
 pub mod proxy;

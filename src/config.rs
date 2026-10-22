@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::filter::TitleFilterRule;
 use crate::launch::LaunchConfig;
+use crate::launcher::SessionBackend;
 use crate::tmux::TmuxConfig;
 
 /// Resolved configuration for the proxy, merged from defaults, TOML, env, and
@@ -47,17 +48,11 @@ pub struct Config {
 }
 
 fn default_command() -> Vec<String> {
-    let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    vec![shell]
+    Vec::new()
 }
 
 fn default_config_path() -> String {
-    let base = env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
-        format!(
-            "{}/.config",
-            env::var("HOME").unwrap_or_else(|_| "/etc".to_string())
-        )
-    });
+    let base = env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{}/.config", env::var("HOME").unwrap_or_else(|_| "/etc".to_string())));
     format!("{base}/term-preserver/config.toml")
 }
 
@@ -97,21 +92,30 @@ impl Default for Config {
 /// [`load_config`]; `Option` fields are `None` when absent so they don't
 /// clobber lower-precedence sources.
 #[derive(Parser)]
-#[command(
-    name = "term-preserver",
-    about = "PTY proxy that observes terminal title sequences"
-)]
+#[command(name = "term-preserver", about = "PTY proxy that observes terminal title sequences")]
 pub struct CliArgs {
+    #[arg(long, hide = true, exclusive = true)]
+    pub launch_worker: Option<String>,
+
+    #[arg(long, help = "Enter a matching tta session/project")]
+    pub tta: Option<String>,
+    #[arg(long, value_enum, help = "Session implementation (auto prefers available tta)")]
+    pub session_backend: Option<SessionBackend>,
+    #[arg(long, help = "tta project root (otherwise TTA_ROOT / PROJECTS_DIR / ~/src)")]
+    pub session_root: Option<String>,
+    #[arg(long, help = "Explicit tmux socket path on the execution host")]
+    pub tmux_socket: Option<String>,
+    #[arg(long, help = "tmux client executable")]
+    pub tmux_program: Option<String>,
+    #[arg(long, help = "tta executable for the subprocess implementation")]
+    pub tta_program: Option<String>,
     #[arg(long, help = "Path to config file")]
     pub config: Option<String>,
 
     #[arg(long, help = "Signals to forward to child")]
     pub forward_signals: Option<Vec<String>>,
 
-    #[arg(
-        long,
-        help = "Signals that request proxy shutdown after forwarding to an active child"
-    )]
+    #[arg(long, help = "Signals that request proxy shutdown after forwarding to an active child")]
     pub shutdown_signals: Option<Vec<String>>,
 
     #[arg(long, help = "Re-emit captured title on child exit")]
@@ -176,6 +180,18 @@ struct CliOverlay {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 struct LaunchOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
+    tta: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_backend: Option<SessionBackend>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tmux_socket: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tmux_program: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tta_program: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     shell: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ssh: Option<String>,
@@ -209,41 +225,31 @@ impl LaunchOverlay {
 impl From<CliArgs> for CliOverlay {
     fn from(args: CliArgs) -> Self {
         let launch_overlay = LaunchOverlay {
+            tta: args.tta,
+            session_backend: args.session_backend,
+            session_root: args.session_root,
+            tmux_socket: args.tmux_socket,
+            tmux_program: args.tmux_program,
+            tta_program: args.tta_program,
             shell: args.shell,
             ssh: args.ssh,
             mosh: args.mosh,
             tmux: args.tmux,
             tmux_create: args.tmux_create,
             tmux_attach: args.tmux_attach,
-            tmux_group: if args.no_tmux_group {
-                Some(false)
-            } else {
-                None
-            },
+            tmux_group: if args.no_tmux_group { Some(false) } else { None },
             dir: args.dir,
             login: if args.no_login { Some(false) } else { None },
-            interactive: if args.no_interactive {
-                Some(false)
-            } else {
-                None
-            },
+            interactive: if args.no_interactive { Some(false) } else { None },
         };
 
         Self {
-            command: if args.command.is_empty() {
-                None
-            } else {
-                Some(args.command)
-            },
+            command: if args.command.is_empty() { None } else { Some(args.command) },
             forward_signals: args.forward_signals,
             shutdown_signals: args.shutdown_signals,
             reemit_title: args.reemit_title,
             print_gone_title: args.print_gone_title,
-            launch: if launch_overlay.is_set() {
-                Some(launch_overlay)
-            } else {
-                None
-            },
+            launch: if launch_overlay.is_set() { Some(launch_overlay) } else { None },
         }
     }
 }
@@ -258,11 +264,7 @@ pub fn load_config(cli_args: CliArgs) -> eyre::Result<Config> {
 
     let config: Config = Figment::from(Serialized::defaults(Config::default()))
         .merge(Toml::file(&config_path))
-        .merge(
-            Env::prefixed("TERM_PRESERVER_")
-                .split("__")
-                .ignore_empty(true),
-        )
+        .merge(Env::prefixed("TERM_PRESERVER_").split("__").ignore_empty(true))
         .merge(Serialized::defaults(overlay))
         .extract()?;
 
@@ -277,15 +279,13 @@ mod tests {
     use tempfile::NamedTempFile;
 
     fn make_cli(args: &[&str]) -> CliArgs {
-        CliArgs::try_parse_from(std::iter::once("term-preserver").chain(args.iter().copied()))
-            .unwrap()
+        CliArgs::try_parse_from(std::iter::once("term-preserver").chain(args.iter().copied())).unwrap()
     }
 
     #[test]
-    fn default_command_uses_shell_env() {
-        let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    fn default_command_is_unspecified_until_launch() {
         let config = Config::default();
-        assert_eq!(config.command, vec![shell]);
+        assert!(config.command.is_empty());
     }
 
     #[test]
@@ -296,7 +296,7 @@ mod tests {
         if let Some(s) = saved {
             env::set_var("SHELL", s);
         }
-        assert_eq!(cmd, vec!["/bin/sh"]);
+        assert!(cmd.is_empty());
     }
 
     #[test]
@@ -367,14 +367,7 @@ command = ["/bin/from-file"]
 
     #[test]
     fn cli_launch_mosh_tmux_parses() {
-        let cli = make_cli(&[
-            "--config",
-            "/dev/null",
-            "--mosh",
-            "w",
-            "--tmux",
-            "compfuzor",
-        ]);
+        let cli = make_cli(&["--config", "/dev/null", "--mosh", "w", "--tmux", "compfuzor"]);
         let config = load_config(cli).unwrap();
         assert_eq!(config.launch.mosh.as_deref(), Some("w"));
         assert_eq!(config.launch.tmux.as_deref(), Some("compfuzor"));
