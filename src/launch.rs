@@ -54,8 +54,7 @@ pub enum TransportKind {
 /// full config shape.
 ///
 /// Derived via [`LaunchConfig::context`] rather than returned from `resolve()`,
-/// keeping argv resolution and introspection context as separate concerns (and
-/// leaving `resolve()`'s signature — and its tests — untouched).
+/// keeping argv resolution and introspection context as separate concerns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchContext {
     pub tmux_target: Option<TmuxMode>,
@@ -108,8 +107,9 @@ pub struct LaunchConfig {
     /// When true (default), `--tmux` create-or-attach joins the session's
     /// group when the primary already exists (independent current window,
     /// shared windows, satellite self-destroys on detach). `--no-tmux-group`
-    /// restores plain attach-to-existing semantics. Requires tmux ≥ 3.4;
-    /// shells without a verifiable conditional degrade to plain.
+    /// restores plain attach-to-existing semantics. The selected session
+    /// backend applies grouping at execution time (tmux ≥ 3.4 semantics);
+    /// shell-only launches ignore it.
     #[serde(default = "default_launch_tmux_group")]
     pub tmux_group: bool,
     #[serde(default = "default_launch_login")]
@@ -182,17 +182,13 @@ fn build_flags_string(login: bool, interactive: bool) -> String {
     }
 }
 
-fn build_fallback_snippet(login: bool, interactive: bool, inner: Option<&InnerJob>, dir: Option<&str>) -> Vec<String> {
+fn build_fallback_snippet(login: bool, interactive: bool, inner: Option<&str>, dir: Option<&str>) -> Vec<String> {
     let flags = build_flags_string(login, interactive);
     let cd_prefix = match dir {
         Some(d) => format!("cd {d} && "),
         None => String::new(),
     };
 
-    // Grouped jobs degrade to `primary` here: the snippet re-execs through
-    // `$SHELL -c` sight-unseen, and the conditional's syntax is family-locked.
-    // Plain create-or-attach is family-neutral and keeps the fallback honest.
-    let inner = inner.map(|job| job.plain());
     let snippet = match inner {
         None => format!(
             "{cd_prefix}if [ -n \"$SHELL\" ]; then exec \"$SHELL\" {flags}; \
@@ -235,154 +231,30 @@ fn resolve_shell(launch: &LaunchConfig, env_shell: Option<&str>) -> ShellResolut
     }
 }
 
-fn build_tmux_command(mode: &TmuxMode, dir: Option<&str>, trailing: &[String]) -> String {
-    let session = mode.session();
-    let dir_flag = dir.map(|d| format!(" -c {d}")).unwrap_or_default();
-    let trailing_str = if trailing.is_empty() {
-        String::new()
-    } else {
-        format!(" {}", trailing.join(" "))
-    };
-
-    match mode {
-        TmuxMode::CreateOrAttach(_) => {
-            format!("tmux new{dir_flag} -As {session}{trailing_str}")
-        }
-        TmuxMode::Create(_) => {
-            format!("tmux new{dir_flag} -s {session}{trailing_str}")
-        }
-        TmuxMode::Attach(_) => {
-            format!("tmux attach-session{dir_flag} -t {session}")
-        }
-    }
-}
-
-/// The satellite variant for grouped create-or-attach: joins the session's
-/// group with an independent current window over the same shared windows.
-/// `destroy-unattached keep-last` (tmux ≥ 3.4) makes this satellite destroy
-/// itself when its client detaches while siblings — including the suffix-less
-/// primary — remain; the last session of a group is always kept, so the
-/// primary never needs the option itself.
-///
-/// No trailing command: the windows are shared with the group, whose initial
-/// window already carries whatever the primary was given.
-fn build_satellite_command(mode: &TmuxMode, dir: Option<&str>) -> String {
-    let session = mode.session();
-    let dir_flag = dir.map(|d| format!(" -c {d}")).unwrap_or_default();
-    format!("tmux new{dir_flag} -t {session} \\; set destroy-unattached keep-last")
-}
-
-/// POSIX-sh conditional picking satellite vs primary at *run* time, so retries
-/// and manual re-runs of the same resolved command re-probe `has-session`
-/// (also on the remote host under ssh/mosh). `-t '=<name>'` demands an exact
-/// session-name match so a lingering `dev-3` satellite never satisfies the
-/// probe for `dev`. The single quotes are load-bearing for zsh: a bare `=dev`
-/// word triggers zsh's `=command` expansion and dies with "dev not found",
-/// while the quotes are inert to bash/fish and are stripped before tmux sees
-/// `=name`. `2>/dev/null` hides has-session's "no such session" (and
-/// no-server) noise; a missing server simply takes the primary branch.
-fn posix_grouped_script(session: &str, satellite: &str, primary: &str) -> String {
-    format!(
-        "if tmux has-session -t '={session}' 2>/dev/null; \
-         then exec {satellite}; else exec {primary}; fi"
-    )
-}
-
-/// fish equivalent: `if`/`else`/`end` with `;` statement separators, which
-/// fish shares with POSIX; `\;` escapes pass tmux its command separator.
-/// The `'=<name>'` quoting matches [`posix_grouped_script`].
-fn fish_grouped_script(session: &str, satellite: &str, primary: &str) -> String {
-    format!(
-        "if tmux has-session -t '={session}' 2>/dev/null; \
-         exec {satellite}; else; exec {primary}; end"
-    )
-}
-
-/// The innermost job for a launch. `Plain` is a single command string as
-/// before; `Grouped` carries the create-or-attach pair whose choice is made
-/// per execution by the shell ([`posix_grouped_script`] / [`fish_grouped_script`]).
-///
-/// Shells without a verifiable conditional form (nushell) and the
-/// `$SHELL`-probing fallback snippet degrade to `primary` — plain
-/// create-or-attach — rather than ship untested syntax.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum InnerJob {
-    Plain(String),
-    Grouped { primary: String, satellite: String, session: String },
-}
-
-impl InnerJob {
-    fn plain(&self) -> &str {
-        match self {
-            InnerJob::Plain(cmd) => cmd,
-            InnerJob::Grouped { primary, .. } => primary,
-        }
-    }
-}
-
-fn resolve_inner_command(launch: &LaunchConfig, trailing: &[String]) -> Option<InnerJob> {
-    let tmux_mode = launch.tmux_mode();
-
-    if let Some(mode) = &tmux_mode {
-        let primary = build_tmux_command(mode, launch.dir.as_deref(), trailing);
-        let job = match mode {
-            TmuxMode::CreateOrAttach(_) if launch.tmux_group => InnerJob::Grouped {
-                primary,
-                satellite: build_satellite_command(mode, launch.dir.as_deref()),
-                session: mode.session().to_string(),
-            },
-            _ => InnerJob::Plain(primary),
-        };
-        return Some(job);
-    }
-
-    if !trailing.is_empty() {
-        return Some(InnerJob::Plain(trailing.join(" ")));
-    }
-
-    None
-}
-
-fn build_shell_invocation(shell: &ShellResolution, inner: Option<&InnerJob>, dir: Option<&str>, login: bool, interactive: bool) -> Vec<String> {
+fn build_shell_invocation(shell: &ShellResolution, inner: Option<&str>, dir: Option<&str>, login: bool, interactive: bool) -> Vec<String> {
     if shell.is_fallback {
         return build_fallback_snippet(login, interactive, inner, dir);
     }
 
     let flags = build_flags_string(login, interactive);
 
-    /// Inner script for POSIX/fish: plain jobs get the usual `exec` prefix;
-    /// grouped jobs become the family's run-time conditional.
-    fn inner_script(job: &InnerJob, family: ShellFamily) -> String {
-        match job {
-            InnerJob::Plain(cmd) => format!("exec {cmd}"),
-            InnerJob::Grouped { primary, satellite, session } => match family {
-                ShellFamily::Posix => posix_grouped_script(session, satellite, primary),
-                ShellFamily::Fish => fish_grouped_script(session, satellite, primary),
-                ShellFamily::Nushell => format!("exec {}", job.plain()),
-            },
-        }
-    }
-
     match shell.family {
         ShellFamily::Nushell => {
             let mut cmd = vec![shell.name.clone()];
             match (inner, dir) {
                 (None, None) => {}
-                (Some(job), None) => {
+                (Some(inner), None) => {
                     cmd.push("-c".into());
-                    // No `exec` prefix for nushell (matches the historic
-                    // form), and grouped jobs degrade to the plain primary:
-                    // the conditional's nu syntax is unverified (no local
-                    // binary to test against).
-                    cmd.push(job.plain().to_string());
+                    // No `exec` prefix for nushell (matches the historic form).
+                    cmd.push(inner.to_string());
                 }
                 (None, Some(d)) => {
                     cmd.push("-c".into());
                     cmd.push(format!("cd {d}; nu"));
                 }
-                (Some(job), Some(d)) => {
+                (Some(inner), Some(d)) => {
                     cmd.push("-c".into());
-                    cmd.push(format!("cd {d}; {}", job.plain()));
+                    cmd.push(format!("cd {d}; {inner}"));
                 }
             }
             cmd
@@ -392,9 +264,9 @@ fn build_shell_invocation(shell: &ShellResolution, inner: Option<&InnerJob>, dir
 
             let c_arg = match (inner, dir) {
                 (None, None) => None,
-                (Some(job), None) => Some(inner_script(job, shell.family)),
+                (Some(inner), None) => Some(format!("exec {inner}")),
                 (None, Some(d)) => Some(format!("cd {d} && exec {name} {flags}", name = shell.name, flags = flags)),
-                (Some(job), Some(d)) => Some(format!("cd {d} && {}", inner_script(job, shell.family))),
+                (Some(inner), Some(d)) => Some(format!("cd {d} && exec {inner}")),
             };
 
             // The `(None, Some(dir))` arm re-execs the same shell with `{flags}`
@@ -529,26 +401,36 @@ impl LaunchConfig {
         Ok(())
     }
 
+    /// Resolve this launch into a repeatable [`CommandSpec`]. A session target
+    /// (`--tta`/`--tmux`/`--tmux-create`/`--tmux-attach`) routes through
+    /// [`crate::launcher::prepare`] for backend selection and policy — there
+    /// is no classic-renderer fallback; an unavailable backend is an error.
     /// `env_shell` is the caller's `$SHELL` (read in the imperative shell), used
     /// only when neither `--shell` nor a config shell is set. Passing it in keeps
     /// this resolution pipeline pure and deterministic in tests.
     pub fn resolve(&self, trailing: &[String], env_shell: Option<&str>) -> eyre::Result<CommandSpec> {
+        crate::launcher::prepare(self, trailing, env_shell)
+    }
+
+    /// Shell-only resolution: wrap the trailing command (if any) in the
+    /// selected shell family's invocation and the transport. No session target
+    /// may be present — [`crate::launcher::prepare`] owns target routing.
+    pub(crate) fn resolve_shell_command(&self, trailing: &[String], env_shell: Option<&str>) -> eyre::Result<CommandSpec> {
         self.validate()?;
-        if self.tmux_mode().is_some() && !cfg!(feature = "classic-tmux-cli") {
-            eyre::bail!("classic tmux CLI launching was not compiled; use launcher::prepare for backend selection");
+        if self.tmux_mode().is_some() {
+            eyre::bail!("a session target requires backend selection; use launcher::prepare");
         }
 
         let shell = resolve_shell(self, env_shell);
-        let inner = resolve_inner_command(self, trailing);
-        let dir_for_shell = if self.tmux_mode().is_some() { None } else { self.dir.as_deref() };
-        let shell_cmd = build_shell_invocation(&shell, inner.as_ref(), dir_for_shell, self.login, self.interactive);
+        let inner = (!trailing.is_empty()).then(|| trailing.join(" "));
+        let shell_cmd = build_shell_invocation(&shell, inner.as_deref(), self.dir.as_deref(), self.login, self.interactive);
         let full_cmd = wrap_transport(shell_cmd, self.ssh.as_deref(), self.mosh.as_deref());
 
         CommandSpec::try_from(full_cmd)
     }
 }
 
-#[cfg(all(test, feature = "classic-tmux-cli"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -656,7 +538,7 @@ mod tests {
             family: ShellFamily::Posix,
             is_fallback: false,
         };
-        let cmd = build_shell_invocation(&shell, Some(&InnerJob::Plain("tmux new -As dev".into())), None, true, true);
+        let cmd = build_shell_invocation(&shell, Some("tmux new -As dev"), None, true, true);
         assert_eq!(cmd, vec!["zsh", "-li", "-c", "exec tmux new -As dev"]);
     }
 
@@ -678,7 +560,7 @@ mod tests {
             family: ShellFamily::Posix,
             is_fallback: false,
         };
-        let cmd = build_shell_invocation(&shell, Some(&InnerJob::Plain("echo hi".into())), None, true, false);
+        let cmd = build_shell_invocation(&shell, Some("echo hi"), None, true, false);
         assert_eq!(cmd, vec!["zsh", "-l", "-c", "exec echo hi"]);
     }
 
@@ -702,7 +584,7 @@ mod tests {
             family: ShellFamily::Nushell,
             is_fallback: false,
         };
-        let cmd = build_shell_invocation(&shell, Some(&InnerJob::Plain("tmux new -As dev".into())), None, true, true);
+        let cmd = build_shell_invocation(&shell, Some("tmux new -As dev"), None, true, true);
         assert_eq!(cmd, vec!["nu", "-c", "tmux new -As dev"]);
     }
 
@@ -726,7 +608,7 @@ mod tests {
             family: ShellFamily::Fish,
             is_fallback: false,
         };
-        let cmd = build_shell_invocation(&shell, Some(&InnerJob::Plain("tmux new -As dev".into())), None, true, true);
+        let cmd = build_shell_invocation(&shell, Some("tmux new -As dev"), None, true, true);
         assert_eq!(cmd, vec!["fish", "-li", "-c", "exec tmux new -As dev"]);
     }
 
@@ -750,7 +632,7 @@ mod tests {
             family: ShellFamily::Posix,
             is_fallback: false,
         };
-        let cmd = build_shell_invocation(&shell, Some(&InnerJob::Plain("make test".into())), Some("~/src/foo"), true, true);
+        let cmd = build_shell_invocation(&shell, Some("make test"), Some("~/src/foo"), true, true);
         assert_eq!(cmd, vec!["zsh", "-li", "-c", "cd ~/src/foo && exec make test"]);
     }
 
@@ -779,7 +661,7 @@ mod tests {
 
     #[test]
     fn fallback_with_inner() {
-        let cmd = build_fallback_snippet(true, true, Some(&InnerJob::Plain("tmux new -As dev".into())), None);
+        let cmd = build_fallback_snippet(true, true, Some("tmux new -As dev"), None);
         assert!(cmd[2].contains("exec tmux new -As dev"));
     }
 
@@ -787,158 +669,6 @@ mod tests {
     fn fallback_with_dir() {
         let cmd = build_fallback_snippet(true, true, None, Some("~/foo"));
         assert!(cmd[2].starts_with("cd ~/foo && "));
-    }
-
-    // --- tmux command construction ---
-
-    #[test]
-    fn tmux_create_or_attach() {
-        let mode = TmuxMode::CreateOrAttach("dev".into());
-        assert_eq!(build_tmux_command(&mode, None, &[]), "tmux new -As dev");
-    }
-
-    #[test]
-    fn tmux_create() {
-        let mode = TmuxMode::Create("dev".into());
-        assert_eq!(build_tmux_command(&mode, None, &[]), "tmux new -s dev");
-    }
-
-    #[test]
-    fn tmux_attach() {
-        let mode = TmuxMode::Attach("dev".into());
-        assert_eq!(build_tmux_command(&mode, None, &[]), "tmux attach-session -t dev");
-    }
-
-    #[test]
-    fn tmux_with_dir() {
-        let mode = TmuxMode::CreateOrAttach("dev".into());
-        assert_eq!(build_tmux_command(&mode, Some("~/src/foo"), &[]), "tmux new -c ~/src/foo -As dev");
-    }
-
-    #[test]
-    fn tmux_with_trailing() {
-        let mode = TmuxMode::CreateOrAttach("dev".into());
-        assert_eq!(build_tmux_command(&mode, None, &["vim".into()]), "tmux new -As dev vim");
-    }
-
-    #[test]
-    fn tmux_attach_with_dir() {
-        let mode = TmuxMode::Attach("dev".into());
-        assert_eq!(build_tmux_command(&mode, Some("~/foo"), &[]), "tmux attach-session -c ~/foo -t dev");
-    }
-
-    // --- grouped satellites ---
-
-    #[test]
-    fn satellite_command() {
-        let mode = TmuxMode::CreateOrAttach("dev".into());
-        assert_eq!(build_satellite_command(&mode, None), r"tmux new -t dev \; set destroy-unattached keep-last");
-    }
-
-    #[test]
-    fn satellite_command_with_dir() {
-        let mode = TmuxMode::CreateOrAttach("dev".into());
-        assert_eq!(
-            build_satellite_command(&mode, Some("~/src/foo")),
-            r"tmux new -c ~/src/foo -t dev \; set destroy-unattached keep-last"
-        );
-    }
-
-    #[test]
-    fn posix_grouped_script_exact_match_probe() {
-        let script = posix_grouped_script("dev", r"tmux new -t dev \; set destroy-unattached keep-last", "tmux new -As dev");
-        assert_eq!(
-            script,
-            "if tmux has-session -t '=dev' 2>/dev/null; \
-             then exec tmux new -t dev \\; set destroy-unattached keep-last; \
-             else exec tmux new -As dev; fi"
-        );
-    }
-
-    #[test]
-    fn fish_grouped_script_shape() {
-        let script = fish_grouped_script("dev", "tmux new -t dev", "tmux new -As dev");
-        assert_eq!(
-            script,
-            "if tmux has-session -t '=dev' 2>/dev/null; \
-             exec tmux new -t dev; else; exec tmux new -As dev; end"
-        );
-    }
-
-    #[test]
-    fn posix_grouped_shell_invocation() {
-        let shell = ShellResolution {
-            name: "zsh".into(),
-            family: ShellFamily::Posix,
-            is_fallback: false,
-        };
-        let job = InnerJob::Grouped {
-            primary: "tmux new -As dev".into(),
-            satellite: r"tmux new -t dev \; set destroy-unattached keep-last".into(),
-            session: "dev".into(),
-        };
-        let cmd = build_shell_invocation(&shell, Some(&job), None, true, true);
-        assert_eq!(cmd[0], "zsh");
-        assert_eq!(cmd[1], "-li");
-        assert_eq!(cmd[2], "-c");
-        assert_eq!(
-            cmd[3],
-            "if tmux has-session -t '=dev' 2>/dev/null; \
-             then exec tmux new -t dev \\; set destroy-unattached keep-last; \
-             else exec tmux new -As dev; fi"
-        );
-    }
-
-    #[test]
-    fn fish_grouped_shell_invocation() {
-        let shell = ShellResolution {
-            name: "fish".into(),
-            family: ShellFamily::Fish,
-            is_fallback: false,
-        };
-        let job = InnerJob::Grouped {
-            primary: "tmux new -As dev".into(),
-            satellite: r"tmux new -t dev \; set destroy-unattached keep-last".into(),
-            session: "dev".into(),
-        };
-        let cmd = build_shell_invocation(&shell, Some(&job), None, true, true);
-        assert_eq!(cmd[0], "fish");
-        assert_eq!(cmd[1], "-li");
-        assert_eq!(cmd[2], "-c");
-        assert_eq!(
-            cmd[3],
-            "if tmux has-session -t '=dev' 2>/dev/null; \
-             exec tmux new -t dev \\; set destroy-unattached keep-last; \
-             else; exec tmux new -As dev; end"
-        );
-    }
-
-    #[test]
-    fn nushell_grouped_degrades_to_plain_primary() {
-        let shell = ShellResolution {
-            name: "nu".into(),
-            family: ShellFamily::Nushell,
-            is_fallback: false,
-        };
-        let job = InnerJob::Grouped {
-            primary: "tmux new -As dev".into(),
-            satellite: r"tmux new -t dev \; set destroy-unattached keep-last".into(),
-            session: "dev".into(),
-        };
-        let cmd = build_shell_invocation(&shell, Some(&job), None, true, true);
-        assert_eq!(cmd, vec!["nu", "-c", "tmux new -As dev"]);
-    }
-
-    #[test]
-    fn fallback_grouped_degrades_to_plain_primary() {
-        let job = InnerJob::Grouped {
-            primary: "tmux new -As dev".into(),
-            satellite: r"tmux new -t dev \; set destroy-unattached keep-last".into(),
-            session: "dev".into(),
-        };
-        let cmd = build_fallback_snippet(true, true, Some(&job), None);
-        assert!(cmd[2].contains("exec tmux new -As dev"));
-        assert!(!cmd[2].contains("has-session"));
     }
 
     // --- transport wrapping ---
@@ -1075,106 +805,7 @@ mod tests {
         assert_eq!(l.context().transport, TransportKind::Mosh("w".into()));
     }
 
-    // --- full resolution pipeline ---
-
-    #[test]
-    fn resolve_local_tmux() {
-        let mut l = launch_with_shell("zsh");
-        l.tmux = Some("dev".into());
-        let spec = l.resolve(&[], None).unwrap();
-        assert_eq!(spec.program, "zsh");
-        assert_eq!(
-            spec.args,
-            vec![
-                "-li",
-                "-c",
-                "if tmux has-session -t '=dev' 2>/dev/null; \
-                 then exec tmux new -t dev \\; set destroy-unattached keep-last; \
-                 else exec tmux new -As dev; fi"
-            ]
-        );
-    }
-
-    #[test]
-    fn resolve_local_tmux_no_group() {
-        let mut l = launch_with_shell("zsh");
-        l.tmux = Some("dev".into());
-        l.tmux_group = false;
-        let spec = l.resolve(&[], None).unwrap();
-        assert_eq!(spec.program, "zsh");
-        assert_eq!(spec.args, vec!["-li", "-c", "exec tmux new -As dev"]);
-    }
-
-    #[test]
-    fn resolve_mosh_tmux() {
-        let mut l = launch_with_shell("zsh");
-        l.mosh = Some("w".into());
-        l.tmux = Some("compfuzor".into());
-        let spec = l.resolve(&[], None).unwrap();
-        assert_eq!(spec.program, "mosh");
-        assert_eq!(
-            spec.args,
-            vec![
-                "w",
-                "--",
-                "zsh",
-                "-li",
-                "-c",
-                "if tmux has-session -t '=compfuzor' 2>/dev/null; \
-                 then exec tmux new -t compfuzor \\; set destroy-unattached keep-last; \
-                 else exec tmux new -As compfuzor; fi"
-            ]
-        );
-    }
-
-    #[test]
-    fn resolve_mosh_nu_tmux() {
-        // Nushell degrades grouping to plain create-or-attach.
-        let mut l = launch_with_shell("nu");
-        l.mosh = Some("w".into());
-        l.tmux = Some("compfuzor".into());
-        let spec = l.resolve(&[], None).unwrap();
-        assert_eq!(spec.program, "mosh");
-        assert_eq!(spec.args, vec!["w", "--", "nu", "-c", "tmux new -As compfuzor"]);
-    }
-
-    #[test]
-    fn resolve_tmux_create_stays_plain() {
-        let mut l = launch_with_shell("zsh");
-        l.tmux_create = Some("dev".into());
-        let spec = l.resolve(&[], None).unwrap();
-        assert_eq!(spec.args, vec!["-li", "-c", "exec tmux new -s dev"]);
-    }
-
-    #[test]
-    fn resolve_tmux_attach_stays_plain() {
-        let mut l = launch_with_shell("zsh");
-        l.tmux_attach = Some("dev".into());
-        let spec = l.resolve(&[], None).unwrap();
-        assert_eq!(spec.args, vec!["-li", "-c", "exec tmux attach-session -t dev"]);
-    }
-
-    #[test]
-    fn resolve_tmux_with_dir_and_trailing() {
-        // `-c` lands in both branches; the trailing command belongs to the
-        // fresh primary only — the satellite shares the group's windows.
-        let mut l = launch_with_shell("zsh");
-        l.tmux = Some("dev".into());
-        l.dir = Some("~/src/foo".into());
-        let spec = l.resolve(&["vim".into()], None).unwrap();
-        assert_eq!(spec.program, "zsh");
-        assert_eq!(
-            spec.args,
-            vec![
-                "-li",
-                "-c",
-                "if tmux has-session -t '=dev' 2>/dev/null; \
-                 then exec tmux new -c ~/src/foo -t dev \\; \
-                 set destroy-unattached keep-last; \
-                 else exec tmux new -c ~/src/foo -As dev vim; fi"
-            ]
-        );
-    }
+    // --- shell-only resolution pipeline ---
 
     #[test]
     fn resolve_dir_without_tmux() {
@@ -1192,28 +823,6 @@ mod tests {
         let spec = l.resolve(&["make".into(), "test".into()], None).unwrap();
         assert_eq!(spec.program, "zsh");
         assert_eq!(spec.args, vec!["-li", "-c", "cd ~/src/foo && exec make test"]);
-    }
-
-    #[test]
-    fn resolve_ssh_tmux_forces_remote_pty() {
-        let mut l = launch_with_shell("zsh");
-        l.ssh = Some("w".into());
-        l.tmux = Some("dev".into());
-        let spec = l.resolve(&[], None).unwrap();
-        assert_eq!(spec.program, "ssh");
-        assert_eq!(
-            spec.args,
-            vec![
-                "-t",
-                "w",
-                // The -c script is shell_quote()d as one token for the ssh
-                // remote line: embedded ' become '\'' — including the
-                // '=<session>' exact-match quoting.
-                "zsh -li -c 'if tmux has-session -t '\\''=dev'\\'' 2>/dev/null; \
-                 then exec tmux new -t dev \\; set destroy-unattached keep-last; \
-                 else exec tmux new -As dev; fi'"
-            ]
-        );
     }
 
     #[test]
@@ -1257,5 +866,36 @@ mod tests {
         l.tmux = Some("dev".into());
         l.tmux_attach = Some("dev".into());
         assert!(l.resolve(&[], None).is_err());
+    }
+
+    // --- resolve routes session targets through backend policy ---
+
+    #[test]
+    fn resolve_session_target_surfaces_backend_policy_conflicts() {
+        // `--tta` with an explicitly requested classic backend is a policy
+        // conflict. resolve must surface the backend policy error rather than
+        // silently rendering legacy classic tmux strings (the retired resolve
+        // behavior).
+        let mut l = launch_with_shell("zsh");
+        l.tta = Some("dev".into());
+        l.session_backend = SessionBackend::ClassicTmuxCli;
+        let error = l.resolve(&[], None).unwrap_err().to_string();
+        assert!(
+            error.contains("requires a tta backend") || error.contains("was not compiled"),
+            "unexpected policy error: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_session_target_never_yields_classic_renderer_strings() {
+        // When policy admits the target, the resolved command is the launcher
+        // worker or a tta client — never the legacy `tmux new` /
+        // `attach-session` renderer, whatever features this build enables.
+        let mut l = launch_with_shell("zsh");
+        l.tmux = Some("dev".into());
+        if let Ok(spec) = l.resolve(&[], None) {
+            assert!(!spec.args.iter().any(|a| a.contains("tmux new")));
+            assert!(!spec.args.iter().any(|a| a.contains("attach-session")));
+        }
     }
 }
