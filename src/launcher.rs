@@ -83,6 +83,14 @@ pub fn normalize_local(launch: &mut LaunchConfig) -> eyre::Result<()> {
 pub fn select_backend(launch: &LaunchConfig, tta_present: bool) -> eyre::Result<SessionBackend> {
     let requested = launch.session_backend;
     let classic_only = launch.tmux_create.is_some() || launch.tmux_attach.is_some();
+    let requires_tta = launch.tta.is_some()
+        || launch
+            .scaffold
+            .as_deref()
+            .is_some_and(|choice| !matches!(choice, "false" | "0" | "off" | "none"));
+    if classic_only && requires_tta {
+        eyre::bail!("--scaffold requires a tta create-or-match target (--tmux or --tta)");
+    }
     if requested != SessionBackend::Auto {
         if !requested.compiled() {
             eyre::bail!("session backend {requested:?} was not compiled");
@@ -90,8 +98,8 @@ pub fn select_backend(launch: &LaunchConfig, tta_present: bool) -> eyre::Result<
         if classic_only && matches!(requested, SessionBackend::TtaLib | SessionBackend::TtaCli) {
             eyre::bail!("--tmux-create/--tmux-attach require a classic tmux backend");
         }
-        if launch.tta.is_some() && matches!(requested, SessionBackend::ClassicTmuxCli | SessionBackend::ClassicTmuxTmax) {
-            eyre::bail!("--tta requires a tta backend");
+        if requires_tta && matches!(requested, SessionBackend::ClassicTmuxCli | SessionBackend::ClassicTmuxTmax) {
+            eyre::bail!("--tta or enabled --scaffold requires a tta backend");
         }
         return Ok(requested);
     }
@@ -104,7 +112,7 @@ pub fn select_backend(launch: &LaunchConfig, tta_present: bool) -> eyre::Result<
             return Ok(SessionBackend::TtaCli);
         }
     }
-    if launch.tta.is_none() {
+    if !requires_tta {
         if cfg!(feature = "classic-tmux-tmax") && !remote {
             return Ok(SessionBackend::ClassicTmuxTmax);
         }
@@ -379,10 +387,12 @@ fn embedded_tta(launch: &LaunchConfig, trailing: &[String]) -> eyre::Result<()> 
         }
     };
     let root = project_root(launch);
-    let selection = tta_launcher::resolve()
+    let choice = scaffold_choice(launch)?;
+    let resolved = tta_launcher::scaffold::resolve()
         .lookup(lookup.as_ref())
         .argument(launch.tmux_mode().as_ref().unwrap().session())
         .maybe_root(root.as_deref())
+        .choice(&choice)
         .call()?;
     let startup: Vec<std::ffi::OsString> = trailing.iter().map(Into::into).collect();
     let directory = launch.dir.as_ref().map(|d| context.cwd.join(d));
@@ -393,7 +403,7 @@ fn embedded_tta(launch: &LaunchConfig, trailing: &[String]) -> eyre::Result<()> 
     };
     let config = std::env::var_os("TTA_TMUX_CONFIG").filter(|s| !s.is_empty()).map(|p| context.cwd.join(p));
     let expression = tta_launcher::launch()
-        .selection(&selection)
+        .selection(&resolved.selection)
         .socket(&socket)
         .client_mode(mode)
         .program(&program)
@@ -401,6 +411,7 @@ fn embedded_tta(launch: &LaunchConfig, trailing: &[String]) -> eyre::Result<()> 
         .startup(&startup)
         .maybe_directory(directory.as_deref())
         .maybe_config(config.as_deref())
+        .maybe_prefix(resolved.prefix.as_ref())
         .call()?;
     let status = expression.execute(tta_command::Handoff::Exec)?;
     std::process::exit(status.map(crate::session::exit_code_from_status).unwrap_or(0));
@@ -638,6 +649,17 @@ mod tests {
             )
             .is_err());
         }
+    }
+
+    #[test]
+    fn explicit_scaffolding_cannot_silently_degrade_to_classic_creation() {
+        let mut launch = target();
+        launch.scaffold = Some("my-generator".into());
+        assert_eq!(select_backend(&launch, false).ok(), cfg!(feature = "tta-lib").then_some(SessionBackend::TtaLib));
+        launch.session_backend = SessionBackend::ClassicTmuxCli;
+        assert!(select_backend(&launch, true).is_err());
+        launch.scaffold = Some("false".into());
+        assert_eq!(select_backend(&launch, false).is_ok(), cfg!(feature = "classic-tmux-cli"));
     }
 
     #[test]

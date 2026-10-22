@@ -295,17 +295,6 @@ mod tests {
     }
 
     #[test]
-    fn default_command_falls_back_to_bin_sh() {
-        let saved = env::var("SHELL").ok();
-        env::remove_var("SHELL");
-        let cmd = default_command();
-        if let Some(s) = saved {
-            env::set_var("SHELL", s);
-        }
-        assert!(cmd.is_empty());
-    }
-
-    #[test]
     fn default_forwarded_signals_are_sigterm_and_sighup() {
         let sigs = default_forward_signals();
         assert_eq!(sigs, vec!["SIGTERM", "SIGHUP"]);

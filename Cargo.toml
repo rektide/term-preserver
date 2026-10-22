@@ -16,7 +16,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 signal-hook = "0.3"
 tmax = { path = "../tmux-interface-control", default-features = false, features = ["client"], optional = true }
-tta-launcher = { path = "../tta/session/launcher", default-features = false, features = ["native", "cli"], optional = true }
+tta-launcher = { path = "../tta/session/launcher", default-features = false, features = ["native", "cli", "scaffold-rekon"], optional = true }
 tta-command = { path = "../tta/shell/command", optional = true }
 
 [features]

@@ -8,13 +8,15 @@ author: model:openai/gpt-6-astra
 date: 2026-10-22
 sources:
   - resource: opencode://ses_e9b53ce88ffeghFZjnj3tsWYCr
-    title: Commission and implement embedded/subprocess tta, optional classic CLI/native tmux, upstream grouping parity and isolated verification
+    title: Commission and implement embedded/subprocess tta, optional classic CLI/native tmux, shared grouping and scaffold policy, and isolated verification
   - resource: /src/launcher.rs
     title: Availability policy and per-attempt launch worker
   - resource: /src/tmux.rs
     title: Shared endpoint and CLI/native observation
   - resource: file:///home/rektide/src/tta/session/launcher/src/plan.rs
     title: Shared grouped launch, initial directory and startup argv planning
+  - resource: file:///home/rektide/src/tta/session/launcher/src/scaffold.rs
+    title: Shared generator registry, scaffold choice and create-prefix resolution
   - resource: file:///home/rektide/src/tmux-interface-control/README.md
     title: Native command/query boundary and existing-server contract
 ---
@@ -23,7 +25,8 @@ sources:
 
 `--tmux <target>` defaults to **tta when available**. tta selects an exact
 session name, otherwise a unique session substring, otherwise a matching project
-under the project root. Ambiguity and lookup errors stop the attempt. Classic
+under the project root. A clean miss can scaffold a project through tta's configured
+generator. Ambiguity and lookup errors stop the attempt. Classic
 tmux instead creates or joins an arbitrary exact session name.
 
 ```sh
@@ -85,7 +88,8 @@ explicitly with a transport reports an error.
 Fallback concerns **availability only**. A tta matching, permission, protocol,
 or execution failure never falls through to classic creation. Explicit backend
 selection never falls back. `--tta` requires a tta implementation even in auto
-mode. `--tmux-create` and `--tmux-attach` retain classic-only semantics.
+mode, as does explicitly enabling `--scaffold`. `--scaffold=false` permits
+classic fallback. `--tmux-create` and `--tmux-attach` retain classic-only semantics.
 
 ## Shared options
 
@@ -93,6 +97,7 @@ mode. `--tmux-create` and `--tmux-attach` retain classic-only semantics.
 |---|---|
 | `--session-backend <value>` | `auto` or one of the four implementations above |
 | `--session-root <path>` | tta project root; otherwise `TTA_ROOT`, home-relative `PROJECTS_DIR`, then `~/src` |
+| `--scaffold[=choice]` | tta generator: `default`, a configured name, or `false`; otherwise `TTA_SCAFFOLD`, then `default` |
 | `--tta-program <path>` | tta executable; default `tta` |
 | `--tmux-program <path>` | Final tmux client and classic CLI query executable; default `tmux` |
 | `--tmux-socket <path>` | Socket on the execution host; local paths are frozen to absolute paths |
@@ -101,9 +106,9 @@ mode. `--tmux-create` and `--tmux-attach` retain classic-only semantics.
 | `-- <argv...>` | Initial command for a newly created session only |
 
 The embedded and subprocess tta adapters use the same target, grouping, directory
-and startup-command surface. tta still requires a session or project match;
-`--dir` overrides a selected project's start directory, rather than supplying
-a new project match. Existing sessions ignore startup argv.
+and startup-command surface. `--dir` overrides a selected project's start
+directory, rather than supplying a new project match. Existing sessions ignore
+startup argv.
 
 Grouping is on by default in term-preserver and requires tmux 3.4+. Satellites
 share windows but have independent current windows, and use
@@ -118,6 +123,35 @@ term-preserver --tta term-preserver --session-backend tta-cli \
   --tta-program ../tta/target/debug/tta
 ```
 
+### Scaffolding
+
+Both adapters use tta's generator registry at `TTA_CONFIG`, otherwise
+`$XDG_CONFIG_HOME/tta/config.toml` or `$HOME/.config/tta/config.toml`.
+Term-preserver's own `[launch] scaffold` selects a generator; it does not define
+another registry. For example, in the **tta** config:
+
+```toml
+[scaffold]
+default = "rk"
+
+[scaffold.generators.rk]
+adapter = "rekon"
+```
+
+`--scaffold` uses the configured default (or sole generator),
+`--scaffold=rk` selects that named entry, and `--scaffold=false` requires an
+existing session/project match. The default is scaffold-enabled in both adapters,
+including when the subprocess CLI was built with a different default posture.
+Remote launches resolve `TTA_SCAFFOLD` on the remote host.
+
+A generator runs only after an unambiguous clean miss and before creating the
+session. Failure stops the launch; an existing session/project never runs the
+generator. Missing or ambiguous generator configuration is reported rather than
+guessed. `tta-lib` includes the `rekon` adapter; the selected CLI must include
+the corresponding adapter too. The current adapter calls the user's external
+`rekon` script, whose own project-location behavior still applies. See
+[tta scaffolding](file:///home/rektide/src/tta/README.md#scaffolding-missing-projects).
+
 The embedded tta adapter also honors `TTA_BACKEND=native|cli` and
 `TTA_TMUX_CONFIG`; the subprocess inherits these tta variables. The explicit
 term-preserver executable and local socket settings own endpoint selection.
@@ -129,6 +163,7 @@ Configuration uses the existing CLI > environment > TOML > defaults layering:
 tmux = "term-preserver"
 session_backend = "auto"
 session_root = "/home/me/src"
+scaffold = "default"
 tmux_socket = "/run/user/1000/work.sock"
 tmux_group = true
 

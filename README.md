@@ -63,7 +63,7 @@ an independent view of the same windows.
 ## Session launcher
 
 `--tmux` now prefers **tta when available**: exact/unique session matching,
-then project-directory matching. Choose `--session-backend classic-tmux-cli`
+then project-directory matching and configured scaffolding. Choose `--session-backend classic-tmux-cli`
 for arbitrary exact-name classic creation. Embedded tta and native `tmax`
 implementations are available through optional Cargo features.
 See [session launch backends](doc/launch/README.md) for build combinations,
@@ -73,20 +73,22 @@ The launch flags compose a single command **inside-out**, so you don't hand-writ
 the nested `ssh … -- shell -c 'tmux …'` invocation yourself:
 
 ```
-shell        (innermost)   →  which shell binary, and how it's invoked
-  tmux       (optional)    →  wrap the shell's job in a tmux session
-    transport (optional)   →  ssh/mosh wraps the whole thing
+job          (optional)   →  trailing startup argv for a new session
+  session    (optional)   →  tta or classic tmux selection and attachment
+    shell                 →  launch environment and invocation
+      transport (optional) →  ssh/mosh wraps the whole thing
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--shell <name>` | Shell override (path or basename) |
+| `--shell <name>` | Launch-shell override (path or basename) |
 | `--ssh <host>` | SSH transport (mutually exclusive with `--mosh`) |
 | `--mosh <host>` | mosh transport (mutually exclusive with `--ssh`) |
 | `--tmux <session>` | Create *or join the session's group* (see [session groups](#session-groups)) |
 | `--tta <fragment>` | Require tta session/project matching |
 | `--session-backend <value>` | `auto`, `tta-lib`, `tta-cli`, `classic-tmux-cli`, `classic-tmux-tmax` |
 | `--session-root <path>` | tta project root |
+| `--scaffold[=choice]` | tta generator: default, configured name, or false |
 | `--tta-program` / `--tmux-program` | Client executable overrides |
 | `--tmux-socket <path>` | Socket on the execution host |
 | `--tmux-create <session>` | Create only (`tmux new -s`) |
@@ -100,6 +102,8 @@ shell        (innermost)   →  which shell binary, and how it's invoked
 as are `--ssh`/`--mosh`. A
 trailing `-- <command>` becomes the innermost job: it runs *inside* tmux when a
 tmux flag is present, otherwise directly under the shell.
+With no startup command, tmux chooses its configured default command/shell;
+`--shell` controls the launcher environment rather than replacing that default.
 
 If none of these flags are given, the launcher is inert and the legacy
 `-- <command>` path (or `$SHELL`) is used unchanged.
@@ -111,7 +115,8 @@ switching windows in one switches them in both, because in tmux the current
 window belongs to the session, not to each client. `--tmux` avoids this by
 default (tmux ≥ 3.4):
 
-- **First run** creates the suffix-less primary. tta requires a matching project;
+- **First run** creates the suffix-less primary. tta selects a matching project
+  or uses its configured scaffold generator on a clean miss;
   classic mode creates the requested exact name.
 - **Later runs** resolve the target *at run time* and, when the primary
   exists, join its group instead of attaching: the new session (`dev-1`,
