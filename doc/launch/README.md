@@ -9,6 +9,8 @@ date: 2026-10-22
 sources:
   - resource: opencode://ses_e9b53ce88ffeghFZjnj3tsWYCr
     title: Commission and implement embedded/subprocess tta, optional classic CLI/native tmux, shared grouping and scaffold policy, and isolated verification
+  - resource: opencode://ses_e9a9a3c0cffeZZGrwYvVEDokp0
+    title: Document the completion candidate protocol's backend-aware session inventory
   - resource: /src/launcher.rs
     title: Availability policy and per-attempt launch worker
   - resource: /src/tmux.rs
@@ -193,6 +195,17 @@ the strongest correlation. tta fragments are never treated as exact fallback
 session names; auto launches also use PID-only correlation. Failed queries retain
 the last complete sample. The polling interval remains approximately 20 seconds,
 so a short-lived attempt can finish before it is sampled.
+
+## Shell completion
+
+The hidden `--completion-candidates {backends,projects,sessions,scaffolds}`
+lane feeds the [Zsh/Zim module](/README.md#zsh--zim-completion) and observes
+the same merged launch configuration. Session inventories follow the effective
+backend exactly as this guide resolves it: embedded native or `TTA_BACKEND=cli`
+lookup for `tta-lib`, the installed tta's own candidate protocol for `tta-cli`,
+native or CLI discovery for the classic backends, with the auto availability
+order above. An absent server is an empty inventory — a query never starts one
+— and errors go to stderr leaving stdout empty so widgets can silence them.
 
 ## Related accounts
 

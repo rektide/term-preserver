@@ -9,6 +9,8 @@ date: 2026-10-22
 sources:
   - resource: opencode://ses_e9b53ce88ffeghFZjnj3tsWYCr
     title: Document selectable tta and classic tmux backends and their shared launch surface
+  - resource: opencode://ses_e9a9a3c0cffeZZGrwYvVEDokp0
+    title: Add the tper alias, Zim-compatible Zsh completion and the candidate protocol
   - resource: /doc/launch/README.md
     title: Feature and runtime launch contract
 ---
@@ -35,10 +37,12 @@ when the child exits, and precise signal handling.
 
     cargo install --path .
 
-Or build and run from source:
+Two binaries install from the same source: `term-preserver` keeps the original
+name, and **`tper`** is the short everyday invocation (`tper --mosh w --tmux
+compfuzor`). Both behave identically. From source:
 
     cargo build --release
-    ./target/release/term-preserver --help
+    ./target/release/tper --help
 
 ## Quick start
 
@@ -182,6 +186,51 @@ For session backends, directory paths and startup argv are literal and quoted
 across shell/transport boundaries; use `--dir "$HOME/src/foo"` to expand a local
 home directory. Shell-only launches retain the original shell-evaluated `cd`
 and minimally quoted trailing-command behavior (`tipre-526`, `tipre-ahg`).
+
+## Zsh / Zim completion
+
+The [Zsh module](shell/zsh/functions/_tper) completes **live tmux session names
+and immediate project directory basenames** for `--tta`/`--tmux`/
+`--tmux-create`/`--tmux-attach` values, plus `--session-backend` (compiled
+backends), `--scaffold=` (configured generators), and the other options. Type a
+prefix, substring, or wildcard pattern, then press **Tab**:
+
+```text
+tper --tmux pipe<Tab>       → tper --tmux pipewire-native
+tper --tmux *wire*nat*<Tab> → tper --tmux pipewire-native
+tper --session-backend aut<Tab> → tper --session-backend auto
+```
+
+Candidates come from the binary itself through a hidden read-only
+`--completion-candidates` lane, so they reflect this build's compiled backends
+and the same root/socket/program configuration layers a launch uses (including
+`TERM_PRESERVER_LAUNCH__*` and `TTA_ROOT`/`PROJECTS_DIR`). Completion observes
+only: it never creates, attaches, or switches a session, never starts a server,
+and never runs a scaffold generator. The module prefers `tper` on PATH and
+falls back to `term-preserver`, so it works whichever name is installed.
+
+First install the binaries with `cargo install --path .`. In your Zim
+configuration (`~/.zimrc`, or `$ZIM_CONFIG_FILE`), add the local module
+**before** the existing `zmodule completion` line:
+
+```zsh
+zmodule ~/src/term-preserver --root shell/zsh
+# ...other completion providers...
+zmodule completion
+```
+
+Run `zimfw install`, then start a new shell. For plain Zsh, put
+`fpath=( ~/src/term-preserver/shell/zsh/functions $fpath )` before your
+`compinit` call. If Tab is bound to `expand-or-complete`, Zsh may expand a
+wildcard against the current directory first; `bindkey '^I' complete-word`
+keeps wildcard project completion predictable. Multiple matches stay available
+through Zsh's completion UI; inserted names are shell-escaped. Press Tab before
+Enter — wildcard matching belongs to completion, while launching uses tta's
+literal exact/unique-substring matching.
+
+The [widget tests](tests/completion.rs) drive real Zsh completion in a private
+PTY against a private tmux socket under `/tmp/opencode`, plus the candidate
+protocol itself across feature combinations.
 
 ## Retry prompt
 
@@ -430,9 +479,11 @@ Each resource with a distinct lifetime gets a small owner:
 
 ```
 src/
-  main.rs        entry point: CLI parse, config load, delegate to library
-  lib.rs         library boundary
+  main.rs        term-preserver entry point (delegates to lib bin_entry)
+  bin/tper.rs    tper entry point: same shared entry, short install name
+  lib.rs         library boundary and the shared binary entry point
   color.rs       ColorSpec + parse_color_spec (rgb:/rgbi:/# → 24-bit)
+  completion.rs  read-only completion candidate inventories (--completion-candidates)
   config.rs      figment2 config loading, Config/CliArgs types
   filter.rs      TitleFilterRule (config), FilterSet (compiled), FilterDecision
   launch.rs      LaunchConfig: shell detection, tmux/transport composition, resolution; LaunchContext
