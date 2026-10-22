@@ -9,7 +9,7 @@
 //! sample survives.
 //!
 //! Parsing is split from I/O: the `parse_*` / `find_*` functions are pure and
-//! unit-tested; only the `query_*` / `sample_once` / [`TmuxSampler`] shell out.
+//! unit-tested; queries use either the configured CLI or native tmax endpoint.
 //!
 //! ## Feature gating
 //!
@@ -38,6 +38,33 @@ use std::thread;
 use std::time::Duration;
 
 // --- configuration ------------------------------------------------------
+
+/// Transport used to query the selected server. An unavailable native backend
+/// yields no sample; it never falls back to invoking the CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryBackend {
+    Cli,
+    Tmax,
+}
+
+/// The same executable/socket selection used by the launcher. `program` is
+/// used only by the CLI backend; native queries connect directly to the socket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TmuxEndpoint {
+    pub program: String,
+    pub socket: Option<String>,
+    pub backend: QueryBackend,
+}
+
+impl Default for TmuxEndpoint {
+    fn default() -> Self {
+        Self {
+            program: "tmux".into(),
+            socket: None,
+            backend: QueryBackend::Cli,
+        }
+    }
+}
 
 /// A source that may fill the tmux slot. Currently only the poll sampler is
 /// implemented; `control` (tmux control mode) and `exit` (exit-time query) are
@@ -193,8 +220,12 @@ const POLL_TICK: Duration = Duration::from_millis(100);
 /// Run `tmux <args>` and return its stdout as text, or `None` if tmux is absent
 /// or reports failure (e.g. no server / no sessions).
 #[cfg(feature = "tmux")]
-fn tmux_output(args: &[&str]) -> Option<String> {
-    let output = Command::new("tmux").args(args).output().ok()?;
+fn tmux_output(endpoint: &TmuxEndpoint, args: &[&str]) -> Option<String> {
+    let mut command = Command::new(&endpoint.program);
+    if let Some(socket) = &endpoint.socket {
+        command.args(["-S", socket]);
+    }
+    let output = command.args(args).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -204,20 +235,29 @@ fn tmux_output(args: &[&str]) -> Option<String> {
 /// Authoritative correlation: the spawned child is a tmux client, so match its
 /// PID against `#{client_pid}`. Only valid while the client is attached.
 #[cfg(feature = "tmux")]
-fn query_session_for_pid(child_pid: u32) -> Option<(String, String)> {
-    let text = tmux_output(&[
-        "list-clients",
-        "-F",
-        "#{client_pid}\t#{session_id}\t#{session_name}",
-    ])?;
-    find_session_for_pid(text.lines(), child_pid)
+fn query_session_for_pid(
+    endpoint: &TmuxEndpoint,
+    child_pid: u32,
+) -> Option<Option<(String, String)>> {
+    let text = tmux_output(
+        endpoint,
+        &[
+            "list-clients",
+            "-F",
+            "#{client_pid}\t#{session_id}\t#{session_name}",
+        ],
+    )?;
+    Some(find_session_for_pid(text.lines(), child_pid))
 }
 
 /// Fallback correlation by the session name we asked for (`--tmux`). Weaker:
 /// tmux may auto-rename or host a duplicate name.
 #[cfg(feature = "tmux")]
-fn query_session_by_name(name: &str) -> Option<(String, String)> {
-    let text = tmux_output(&["list-sessions", "-F", "#{session_name}\t#{session_id}"])?;
+fn query_session_by_name(endpoint: &TmuxEndpoint, name: &str) -> Option<(String, String)> {
+    let text = tmux_output(
+        endpoint,
+        &["list-sessions", "-F", "#{session_name}\t#{session_id}"],
+    )?;
     for line in text.lines() {
         if let Some((n, id)) = parse_session_line(line) {
             if n == name {
@@ -230,7 +270,7 @@ fn query_session_by_name(name: &str) -> Option<(String, String)> {
 
 /// Per-pane introspection for a session: window, pane, and the inner command.
 #[cfg(feature = "tmux")]
-fn query_panes(session_id: &str) -> Vec<TmuxPaneInfo> {
+fn query_panes(endpoint: &TmuxEndpoint, session_id: &str) -> Option<Vec<TmuxPaneInfo>> {
     let format = "\
 #{window_index}\t\
 #{window_name}\t\
@@ -238,24 +278,123 @@ fn query_panes(session_id: &str) -> Vec<TmuxPaneInfo> {
 #{pane_current_command}\t\
 #{pane_current_path}\t\
 #{pane_pid}";
-    let Some(text) = tmux_output(&["list-panes", "-t", session_id, "-s", "-F", format]) else {
-        return Vec::new();
-    };
-    text.lines().filter_map(parse_pane_line).collect()
+    let text = tmux_output(
+        endpoint,
+        &["list-panes", "-t", session_id, "-s", "-F", format],
+    )?;
+    text.lines().map(parse_pane_line).collect()
 }
 
 /// Read one full sample ("read"): correlate by PID, fall back to the requested
-/// name, then list panes. Returns `None` if the session can't be found.
-#[cfg(feature = "tmux")]
+/// exact name, then list panes, using the default endpoint.
 pub fn sample_once(child_pid: u32, fallback_name: Option<&str>) -> Option<TmuxSample> {
-    let (session_id, session_name) = query_session_for_pid(child_pid)
-        .or_else(|| fallback_name.and_then(query_session_by_name))?;
-    let panes = query_panes(&session_id);
+    sample_at(&TmuxEndpoint::default(), child_pid, fallback_name)
+}
+
+/// Sample a selected server. A failed query yields no sample so the sampler
+/// retains its last complete state. `None` as fallback means PID-only matching.
+#[cfg(feature = "tmux")]
+pub fn sample_at(
+    endpoint: &TmuxEndpoint,
+    child_pid: u32,
+    fallback_name: Option<&str>,
+) -> Option<TmuxSample> {
+    match endpoint.backend {
+        QueryBackend::Cli => sample_cli(endpoint, child_pid, fallback_name),
+        QueryBackend::Tmax => sample_native(endpoint, child_pid, fallback_name),
+    }
+}
+
+#[cfg(not(feature = "tmux"))]
+pub fn sample_at(
+    _endpoint: &TmuxEndpoint,
+    _child_pid: u32,
+    _fallback_name: Option<&str>,
+) -> Option<TmuxSample> {
+    None
+}
+
+#[cfg(feature = "tmux")]
+fn sample_cli(
+    endpoint: &TmuxEndpoint,
+    child_pid: u32,
+    fallback_name: Option<&str>,
+) -> Option<TmuxSample> {
+    let (session_id, session_name) = query_session_for_pid(endpoint, child_pid)?
+        .or_else(|| fallback_name.and_then(|name| query_session_by_name(endpoint, name)))?;
+    let panes = query_panes(endpoint, &session_id)?;
     Some(TmuxSample {
         session_id: Some(session_id),
         session_name: Some(session_name),
         panes,
     })
+}
+
+#[cfg(all(
+    feature = "tmux",
+    any(feature = "tta-lib", feature = "classic-tmux-tmax")
+))]
+fn sample_native(
+    endpoint: &TmuxEndpoint,
+    child_pid: u32,
+    fallback_name: Option<&str>,
+) -> Option<TmuxSample> {
+    use tmax::query::{Clients, DisplayMessage, Panes, Sessions, Windows};
+
+    let mut tmux = tmax::endpoint::Tmux::new();
+    if let Some(socket) = &endpoint.socket {
+        tmux = tmux.socket_path(socket);
+    }
+    let clients = tmux.query(Clients::all()).ok()?;
+    let session = clients
+        .into_iter()
+        .find(|client| client.pid == child_pid)
+        .map(|client| (client.session_id, client.session_name));
+    let (session_id, session_name) = session.or_else(|| {
+        let name = fallback_name?;
+        tmux.query(Sessions::new())
+            .ok()?
+            .into_iter()
+            .find(|session| session.name == name)
+            .map(|session| (session.session_id, session.name))
+    })?;
+    let windows = tmux.query(Windows::in_session(session_id)).ok()?;
+    let mut panes = Vec::new();
+    for pane in tmux.query(Panes::in_session(session_id)).ok()? {
+        let window = windows
+            .iter()
+            .find(|window| window.window_id == pane.window_id)?;
+        // The fixed Panes schema omits pane_pid. Query it explicitly instead of
+        // losing a field from the shared CLI/native sample surface.
+        let pid = tmux
+            .query(DisplayMessage::new("#{pane_pid}").target(pane.pane_id))
+            .ok()?;
+        panes.push(TmuxPaneInfo {
+            window_index: window.index.to_string(),
+            window_name: window.name.clone(),
+            pane_id: pane.pane_id.to_string(),
+            current_command: pane.current_command,
+            current_path: pane.current_path,
+            pane_pid: Some(pid.parse().ok()?),
+        });
+    }
+    Some(TmuxSample {
+        session_id: Some(session_id.to_string()),
+        session_name: Some(session_name),
+        panes,
+    })
+}
+
+#[cfg(all(
+    feature = "tmux",
+    not(any(feature = "tta-lib", feature = "classic-tmux-tmax"))
+))]
+fn sample_native(
+    _endpoint: &TmuxEndpoint,
+    _child_pid: u32,
+    _fallback_name: Option<&str>,
+) -> Option<TmuxSample> {
+    None
 }
 
 /// Owner of the sampler thread. Started by `ChildSession` when a local tmux
@@ -274,19 +413,37 @@ pub struct TmuxSampler {
 
 impl TmuxSampler {
     /// Start the polling sampler against the local tmux server.
-    #[cfg(feature = "tmux")]
     pub fn start(
         child_pid: u32,
         target: TmuxMode,
         child_alive: Arc<AtomicBool>,
         state: TmuxState,
     ) -> Self {
+        Self::start_at(
+            child_pid,
+            Some(target),
+            child_alive,
+            state,
+            TmuxEndpoint::default(),
+        )
+    }
+
+    /// Start against the launcher's endpoint. Omit `target` when the launch
+    /// selected by fragment or another policy rather than an exact session name.
+    #[cfg(feature = "tmux")]
+    pub fn start_at(
+        child_pid: u32,
+        target: Option<TmuxMode>,
+        child_alive: Arc<AtomicBool>,
+        state: TmuxState,
+        endpoint: TmuxEndpoint,
+    ) -> Self {
         let alive = child_alive.clone();
         let handle = thread::spawn(move || {
-            let fallback = target.session().to_string();
+            let fallback = target.as_ref().map(TmuxMode::session);
             let ticks = (SAMPLE_INTERVAL.as_millis() / POLL_TICK.as_millis()) as u32;
             while alive.load(Ordering::Relaxed) {
-                if let Some(sample) = sample_once(child_pid, Some(&fallback)) {
+                if let Some(sample) = sample_at(&endpoint, child_pid, fallback) {
                     state.set(sample);
                 }
                 for _ in 0..ticks {
@@ -307,11 +464,12 @@ impl TmuxSampler {
     /// call sites identical so `ChildSession` is feature-agnostic.
     #[cfg(not(feature = "tmux"))]
     #[allow(unused_variables)]
-    pub fn start(
+    pub fn start_at(
         child_pid: u32,
-        target: TmuxMode,
+        target: Option<TmuxMode>,
         child_alive: Arc<AtomicBool>,
         state: TmuxState,
+        endpoint: TmuxEndpoint,
     ) -> Self {
         Self {
             child_alive: None,
