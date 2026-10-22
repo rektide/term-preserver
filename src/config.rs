@@ -374,6 +374,28 @@ command = ["/bin/from-file"]
     }
 
     #[test]
+    fn session_backend_cli_overrides_file_without_inventing_startup_command() {
+        let mut tmp = NamedTempFile::new().unwrap();
+        use std::io::Write;
+        tmp.write_all(b"[launch]\nsession_backend = 'tta-cli'\nsession_root = '/projects'\n").unwrap();
+        let config = load_config(make_cli(&[
+            "--config",
+            tmp.path().to_str().unwrap(),
+            "--tmux",
+            "dev",
+            "--session-backend",
+            "classic-tmux-cli",
+            "--tmux-socket",
+            "/private/sock",
+        ]))
+        .unwrap();
+        assert_eq!(config.launch.session_backend, SessionBackend::ClassicTmuxCli);
+        assert_eq!(config.launch.session_root.as_deref(), Some("/projects"));
+        assert_eq!(config.launch.tmux_socket.as_deref(), Some("/private/sock"));
+        assert!(config.command.is_empty());
+    }
+
+    #[test]
     fn cli_no_login_maps_to_false() {
         let cli = make_cli(&["--config", "/dev/null", "--no-login"]);
         let config = load_config(cli).unwrap();

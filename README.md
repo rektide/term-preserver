@@ -1,3 +1,18 @@
+---
+type: Guide
+title: term-preserver
+description: Terminal-state PTY proxy, retry loop and composable session launcher
+resource: /README.md
+status: implemented
+author: model:openai/gpt-6-astra
+date: 2026-10-22
+sources:
+  - resource: opencode://ses_e9b53ce88ffeghFZjnj3tsWYCr
+    title: Document selectable tta and classic tmux backends and their shared launch surface
+  - resource: /doc/launch/README.md
+    title: Feature and runtime launch contract
+---
+
 # term-preserver
 
 > 🛟 Keep a terminal window title from reverting when a session detaches.
@@ -47,6 +62,13 @@ an independent view of the same windows.
 
 ## Session launcher
 
+`--tmux` now prefers **tta when available**: exact/unique session matching,
+then project-directory matching. Choose `--session-backend classic-tmux-cli`
+for arbitrary exact-name classic creation. Embedded tta and native `tmax`
+implementations are available through optional Cargo features.
+See [session launch backends](doc/launch/README.md) for build combinations,
+availability rules, shared options, and local/remote behavior.
+
 The launch flags compose a single command **inside-out**, so you don't hand-write
 the nested `ssh … -- shell -c 'tmux …'` invocation yourself:
 
@@ -62,6 +84,11 @@ shell        (innermost)   →  which shell binary, and how it's invoked
 | `--ssh <host>` | SSH transport (mutually exclusive with `--mosh`) |
 | `--mosh <host>` | mosh transport (mutually exclusive with `--ssh`) |
 | `--tmux <session>` | Create *or join the session's group* (see [session groups](#session-groups)) |
+| `--tta <fragment>` | Require tta session/project matching |
+| `--session-backend <value>` | `auto`, `tta-lib`, `tta-cli`, `classic-tmux-cli`, `classic-tmux-tmax` |
+| `--session-root <path>` | tta project root |
+| `--tta-program` / `--tmux-program` | Client executable overrides |
+| `--tmux-socket <path>` | Socket on the execution host |
 | `--tmux-create <session>` | Create only (`tmux new -s`) |
 | `--tmux-attach <session>` | Attach only (`tmux attach-session -t`) |
 | `--dir <path>` | Working directory for the innermost layer |
@@ -69,7 +96,8 @@ shell        (innermost)   →  which shell binary, and how it's invoked
 | `--no-interactive` | Drop interactive mode (default: interactive) |
 | `--no-tmux-group` | Plain create-or-attach (`tmux new -As`); for tmux < 3.4 or shared view |
 
-The three `--tmux*` flags are mutually exclusive, as are `--ssh`/`--mosh`. A
+`--tta` and the three target-selecting `--tmux*` flags are mutually exclusive,
+as are `--ssh`/`--mosh`. A
 trailing `-- <command>` becomes the innermost job: it runs *inside* tmux when a
 tmux flag is present, otherwise directly under the shell.
 
@@ -83,9 +111,9 @@ switching windows in one switches them in both, because in tmux the current
 window belongs to the session, not to each client. `--tmux` avoids this by
 default (tmux ≥ 3.4):
 
-- **First run** (no such session) creates the suffix-less primary — exactly
-  `tmux new -As <session>`.
-- **Later runs** probe `tmux has-session` *at run time* and, when the primary
+- **First run** creates the suffix-less primary. tta requires a matching project;
+  classic mode creates the requested exact name.
+- **Later runs** resolve the target *at run time* and, when the primary
   exists, join its group instead of attaching: the new session (`dev-1`,
   `dev-2`, …) shares the same windows but keeps its **own current window**, so
   each terminal navigates independently. It also sets
@@ -93,7 +121,7 @@ default (tmux ≥ 3.4):
   detaches while the group still has members — the primary survives and keeps
   the windows alive across reconnects.
 
-On a POSIX shell the resolved inner command is:
+The classic remote CLI path uses this POSIX-shell pattern:
 
 ```sh
 if tmux has-session -t '=dev' 2>/dev/null; \
@@ -101,34 +129,31 @@ if tmux has-session -t '=dev' 2>/dev/null; \
    else exec tmux new -As dev; fi
 ```
 
-The probe uses `-t '=dev'` (exact name match) so a lingering `dev-3` satellite
+That probe uses `-t '=dev'` (exact name match) so a lingering `dev-3` satellite
 never satisfies it — and the quotes are required for zsh, whose `=command`
 expansion would otherwise reject the bare `=dev` word. The condition
 re-evaluates on every retry or manual re-run — locally or on the remote host
 under ssh/mosh. A trailing `-- <command>` applies to the fresh primary's
-initial window only. fish gets the equivalent `if`/`end` form; nushell and the
-`$SHELL`-probing fallback degrade to plain `new -As` (no local binary to
-verify a nushell conditional against). `--no-tmux-group` (or
+initial window only. Local attempts use a launch worker; remote conditional
+commands use a POSIX carrier beneath the selected shell. `--no-tmux-group` (or
 `[launch] tmux_group = false`) opts out everywhere; `--tmux-attach` remains
 the explicit "I want the shared view" flag.
 
-### What each invocation resolves to
+### Launch examples
 
-| You run | Resolved command |
-|---------|------------------|
-| `term-preserver` | `zsh -li` |
-| `--shell bash` | `bash -li` |
-| `--tmux dev` | `zsh -li -c "if tmux has-session -t '=dev' 2>/dev/null; then exec tmux new -t dev \; set destroy-unattached keep-last; else exec tmux new -As dev; fi"` |
-| `--tmux dev --no-tmux-group` | `zsh -li -c 'exec tmux new -As dev'` |
-| `--mosh w --tmux compfuzor` | `mosh w -- zsh -li -c 'if tmux has-session -t '\''=compfuzor'\'' 2>/dev/null … else exec tmux new -As compfuzor; fi'` |
-| `--ssh w --tmux dev` | `ssh -t w "zsh -li -c 'if tmux has-session -t '\''=dev'\'' 2>/dev/null … else exec tmux new -As dev; fi'"` |
-| `--mosh w --shell nu --tmux dev` | `mosh w -- nu -c 'tmux new -As dev'` (nushell: no grouping) |
-| `--dir ~/src/foo` | `zsh -c 'cd ~/src/foo && exec zsh -li'` |
-| `--dir ~/src/foo -- make test` | `zsh -li -c 'cd ~/src/foo && exec make test'` |
-| `--ssh w` | `ssh -t w 'zsh -li'` |
+| You run | Behavior |
+|---------|----------|
+| `term-preserver` | Run `$SHELL` |
+| `--shell bash` | Run `bash -li` |
+| `--tmux dev` | Prefer available tta; resolve again on every attempt |
+| `--tmux dev --no-tmux-group` | Share the existing session's current window |
+| `--tmux dev --session-backend classic-tmux-cli` | Exact-name classic create/group |
+| `--mosh w --tmux compfuzor` | Select available CLI backend on `w` |
+| `--ssh w --tmux dev` | SSH PTY transport with remote backend selection |
+| `--dir ~/src/foo -- make test` | Run the command in the directory through the shell |
 
-(`zsh` above is whatever resolves from `--shell`, then `$SHELL`, then a runtime
-fallback that prefers zsh and finally `sh`.)
+Session attempts use the worker or remote availability carrier described in
+[launch backends](doc/launch/README.md#attempt-ownership-and-observation).
 
 Notes:
 
@@ -148,12 +173,10 @@ Notes:
 
 ### What's shell-evaluated vs literal
 
-`--dir` is **evaluated by the shell** (`cd <path>`), so `~`, `$VAR`, and globs
-expand as you'd expect — but a path containing spaces currently needs manual
-escaping. Trailing command arguments and tmux session names are passed through
-with minimal quoting today; arguments containing spaces or shell metacharacters
-may not survive intact. Tightening this is tracked in the issue tracker
-(`tipre-526`, `tipre-ahg`).
+For session backends, directory paths and startup argv are literal and quoted
+across shell/transport boundaries; use `--dir "$HOME/src/foo"` to expand a local
+home directory. Shell-only launches retain the original shell-evaluated `cd`
+and minimally quoted trailing-command behavior (`tipre-526`, `tipre-ahg`).
 
 ## Retry prompt
 
@@ -391,9 +414,9 @@ Each resource with a distinct lifetime gets a small owner:
   sample in `TmuxState` so the session id / inner command survive child exit.
 - **`PromptPolicy`** — pure function mapping prompt keystrokes to retry/exit
   decisions. Testable without spawning the binary.
-- **`LaunchConfig`** — pure pipeline resolving the composable launch flags
+- **`LaunchConfig`** — configuration for the composable launch flags
   (`--shell`, `--ssh`, `--mosh`, `--tmux`, `--dir`) into a `CommandSpec`. Reads
-  no I/O; `$SHELL` is injected by the caller. Also derives a focused
+  shell-only resolution is pure; session workers resolve on each attempt. Also derives a focused
   `LaunchContext` (tmux target + transport) that moves through execution to feed
   the sampler — only a *local* tmux server is reachable by the local `tmux`
   binary, so remote transports yield no sample.
@@ -408,6 +431,7 @@ src/
   config.rs      figment2 config loading, Config/CliArgs types
   filter.rs      TitleFilterRule (config), FilterSet (compiled), FilterDecision
   launch.rs      LaunchConfig: shell detection, tmux/transport composition, resolution; LaunchContext
+  launcher.rs    backend availability, tta adapters, classic CLI/native discovery, retry worker
   runtime.rs     ProxyRuntime, event channel, signal coordinator
   session.rs     ChildSession, RelayThreads, ObservedState/Slots, SessionExit
   proxy.rs       RetryLoop orchestrator

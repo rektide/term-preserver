@@ -66,7 +66,7 @@ pub fn normalize_local(launch: &mut LaunchConfig) -> eyre::Result<()> {
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/tmp"));
-        cwd.join(base).join(format!("tmux-{}", nix::unistd::geteuid())).join("default")
+        cwd.join(base).join(format!("tmux-{}", nix::unistd::geteuid().as_raw())).join("default")
     };
     launch.tmux_socket = Some(
         socket
@@ -121,6 +121,9 @@ pub fn prepare(launch: &LaunchConfig, trailing: &[String], env_shell: Option<&st
     if launch.tmux_mode().is_none() {
         return launch.resolve(trailing, env_shell);
     }
+    // Validate feature/operation compatibility here; executable presence is
+    // resolved later, in the child's login environment or on the remote host.
+    select_backend(launch, true)?;
     if launch.session_backend != SessionBackend::Auto && !launch.session_backend.compiled() {
         eyre::bail!("session backend {:?} was not compiled", launch.session_backend);
     }
@@ -272,6 +275,7 @@ pub fn execute_worker(json: &str) -> eyre::Result<()> {
     let backend = select_backend(&launch, executable_present(&launch.tta_program))?;
     // Normalize even for direct library callers of the worker entrypoint.
     normalize_local(&mut launch)?;
+    ensure_default_socket_directory(&launch)?;
     match backend {
         SessionBackend::TtaCli => exec_argv(tta_argv(&launch, &trailing)),
         #[cfg(feature = "tta-lib")]
@@ -280,6 +284,26 @@ pub fn execute_worker(json: &str) -> eyre::Result<()> {
         SessionBackend::ClassicTmuxCli | SessionBackend::ClassicTmuxTmax => classic_local(&launch, &trailing, backend),
         _ => Err(eyre::eyre!("session backend {backend:?} was not compiled")),
     }
+}
+
+// Explicit -S freezes endpoint identity but unlike -L does not create tmux's
+// default private directory on first use. Only create that conventional directory;
+// arbitrary user-selected socket parents remain the caller's responsibility.
+fn ensure_default_socket_directory(launch: &LaunchConfig) -> eyre::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    let base = std::env::var_os("TMUX_TMPDIR")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    let directory = std::env::current_dir()?.join(base).join(format!("tmux-{}", nix::unistd::geteuid().as_raw()));
+    if launch.tmux_socket.as_deref().map(Path::new) == Some(directory.join("default").as_path()) {
+        match std::fs::DirBuilder::new().mode(0o700).create(&directory) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && directory.is_dir() => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 fn exec_argv(argv: Vec<String>) -> eyre::Result<()> {
@@ -301,7 +325,9 @@ fn embedded_tta(launch: &LaunchConfig, trailing: &[String]) -> eyre::Result<()> 
         Err(std::env::VarError::NotPresent) | Ok("") | Ok("native") => Box::new(backend::Native {
             endpoint: tmax::endpoint::Tmux::new().socket_path(&socket.path),
         }),
-        _ => eyre::bail!("TTA_BACKEND must be native or cli"),
+        _ => {
+            eyre::bail!("TTA_BACKEND must be native or cli");
+        }
     };
     let root = project_root(launch);
     let selection = tta_launcher::resolve()
@@ -423,7 +449,9 @@ fn classic_local(launch: &LaunchConfig, trailing: &[String], backend: SessionBac
             SessionBackend::ClassicTmuxTmax => native_existing(launch, mode.session())?,
             #[cfg(feature = "classic-tmux-cli")]
             SessionBackend::ClassicTmuxCli => cli_existing(launch, mode.session())?,
-            _ => eyre::bail!("classic backend was not compiled"),
+            _ => {
+                eyre::bail!("classic backend was not compiled");
+            }
         }
     } else {
         None
@@ -435,6 +463,7 @@ fn classic_local(launch: &LaunchConfig, trailing: &[String], backend: SessionBac
 fn cli_existing(launch: &LaunchConfig, name: &str) -> eyre::Result<Option<String>> {
     let argv = tmux_argv(launch);
     let output = Command::new(&argv[0])
+        .arg("-u")
         .args(&argv[1..])
         .args(["list-sessions", "-F", "#{session_id}\t#{session_name}"])
         .env("LC_ALL", "C")
@@ -458,6 +487,135 @@ fn cli_existing(launch: &LaunchConfig, name: &str) -> eyre::Result<Option<String
         .filter_map(|line| line.split_once('\t'))
         .find(|(_, n)| *n == name)
         .map(|(id, _)| id.to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target() -> LaunchConfig {
+        LaunchConfig {
+            tmux: Some("dev".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn availability_orders_tta_before_classic_and_never_uses_remote_libraries() {
+        let launch = target();
+        let expected = if cfg!(feature = "tta-lib") {
+            Some(SessionBackend::TtaLib)
+        } else if cfg!(feature = "tta-cli") {
+            Some(SessionBackend::TtaCli)
+        } else if cfg!(feature = "classic-tmux-tmax") {
+            Some(SessionBackend::ClassicTmuxTmax)
+        } else if cfg!(feature = "classic-tmux-cli") {
+            Some(SessionBackend::ClassicTmuxCli)
+        } else {
+            None
+        };
+        assert_eq!(select_backend(&launch, true).ok(), expected);
+        let remote = LaunchConfig {
+            ssh: Some("w".into()),
+            ..launch
+        };
+        let expected = if cfg!(feature = "tta-cli") {
+            Some(SessionBackend::TtaCli)
+        } else if cfg!(feature = "classic-tmux-cli") {
+            Some(SessionBackend::ClassicTmuxCli)
+        } else {
+            None
+        };
+        assert_eq!(select_backend(&remote, true).ok(), expected);
+        assert_eq!(
+            select_backend(&remote, false).ok(),
+            cfg!(feature = "classic-tmux-cli").then_some(SessionBackend::ClassicTmuxCli)
+        );
+    }
+
+    #[test]
+    fn explicit_backend_never_falls_back_when_not_compiled() {
+        for backend in [
+            SessionBackend::TtaLib,
+            SessionBackend::TtaCli,
+            SessionBackend::ClassicTmuxCli,
+            SessionBackend::ClassicTmuxTmax,
+        ] {
+            let launch = LaunchConfig {
+                session_backend: backend,
+                ..target()
+            };
+            assert_eq!(select_backend(&launch, false).ok(), backend.compiled().then_some(backend));
+        }
+    }
+
+    #[test]
+    fn explicit_tta_never_falls_back_to_classic() {
+        let launch = LaunchConfig {
+            tta: Some("dev".into()),
+            ..Default::default()
+        };
+        assert_eq!(select_backend(&launch, false).ok(), cfg!(feature = "tta-lib").then_some(SessionBackend::TtaLib));
+        for backend in [SessionBackend::ClassicTmuxCli, SessionBackend::ClassicTmuxTmax] {
+            assert!(select_backend(
+                &LaunchConfig {
+                    session_backend: backend,
+                    ..launch.clone()
+                },
+                true
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn create_only_and_attach_only_keep_classic_semantics() {
+        for mut launch in [
+            LaunchConfig {
+                tmux_create: Some("dev".into()),
+                ..Default::default()
+            },
+            LaunchConfig {
+                tmux_attach: Some("dev".into()),
+                ..Default::default()
+            },
+        ] {
+            assert!(!matches!(
+                select_backend(&launch, true).ok(),
+                Some(SessionBackend::TtaLib | SessionBackend::TtaCli)
+            ));
+            launch.session_backend = SessionBackend::TtaCli;
+            assert!(select_backend(&launch, true).is_err());
+        }
+    }
+
+    #[test]
+    fn tta_argv_protects_fragment_and_startup_words() {
+        let launch = LaunchConfig {
+            tmux: Some("-project".into()),
+            ..Default::default()
+        };
+        let args = tta_argv(&launch, &["printf".into(), "a ; $b".into()]);
+        let start = args.iter().position(|s| s == "--").unwrap();
+        assert_eq!(&args[start..], &["--", "-project", "printf", "a ; $b"]);
+    }
+
+    #[cfg(feature = "classic-tmux-cli")]
+    #[test]
+    fn classic_argv_separates_formats_command_delimiters_and_startup_argv() {
+        let launch = LaunchConfig {
+            tmux: Some("a#b;".into()),
+            tmux_socket: Some("/socket;".into()),
+            ..Default::default()
+        };
+        let primary = classic_argv(&launch, &["/a b;".into()], None).unwrap();
+        assert_eq!(primary[2], "/socket;"); // process option, not tmux command syntax
+        assert!(primary.iter().any(|s| s == "a#{a:35}b\\;"));
+        assert_eq!(primary.last().unwrap(), "exec '/a b;'");
+        let group = classic_argv(&launch, &["ignored".into()], Some("$2")).unwrap();
+        assert!(group.iter().any(|s| s == ";"));
+        assert!(!group.iter().any(|s| s == "ignored"));
+    }
 }
 
 #[cfg(feature = "classic-tmux-tmax")]

@@ -505,7 +505,7 @@ impl LaunchConfig {
             tmux_program: self.tmux_program.clone(),
             tmux_socket: self.tmux_socket.clone(),
             native_queries: matches!(self.session_backend, SessionBackend::TtaLib | SessionBackend::ClassicTmuxTmax)
-                || (self.session_backend == SessionBackend::Auto && cfg!(feature = "tta-lib")),
+                || (self.session_backend == SessionBackend::Auto && cfg!(any(feature = "tta-lib", feature = "classic-tmux-tmax"))),
             exact_target: self.tta.is_none()
                 && (self.tmux_create.is_some()
                     || self.tmux_attach.is_some()
