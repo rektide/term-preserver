@@ -1,15 +1,16 @@
 #compdef tper term-preserver
 #
-# Live option, session and project completion for term-preserver, typically
-# installed as tper. Candidates come from the binary's hidden read-only
-# --completion-candidates protocol, so they reflect compiled backends, the
-# configured project root, the selected socket and the scaffold registry.
-# Completion never creates, attaches or switches a session, never starts a
-# server, and never runs a scaffold generator.
+# Live option, session, project and scaffold completion for term-preserver,
+# typically installed as tper. Candidates come from the binary's hidden
+# read-only --completion-candidates protocol, so they reflect compiled
+# backends, the configured project root, the selected socket, the config file
+# and the scaffold registry. Completion never creates, attaches or switches a
+# session, never starts a server, never initiates a transport, and never runs
+# a scaffold generator; inventories are local-only.
 
 local curcontext="$curcontext" context state state_descr line ret=1
 local -A opt_args
-local -a query sessions projects expl
+local -a query sessions projects generators backends expl
 local option program
 
 # Prefer the short alias; fall back to the original binary name so completion
@@ -45,28 +46,39 @@ _arguments -s -S -C \
   '--no-tmux-group[Attach to the existing session instead of joining its group]' \
   '--no-login[Skip login shell mode]' \
   '--no-interactive[Skip interactive shell mode]' \
-  '(-h --help)'{-h,--help}'[Show help]' \
-  '(-V --version)'{-V,--version}'[Show version]' && ret=0
+  '(-h --help)'{-h,--help}'[Show help]' && ret=0
+
+# Every candidate query carries the lookup configuration already on the line,
+# including the config file and the transport selectors: the binary then knows
+# the root/socket/programs a launch would use, and answers no host inventory
+# for a remote context instead of silently querying the wrong local server.
+# opt_args already holds the partially typed value of the option being
+# completed, so that option is dropped from the forward list and never
+# constrains its own candidates. _arguments accepts both OPTION VALUE and
+# OPTION=VALUE forms, including quoting.
+local -a forward
+forward=( --config --session-root --session-backend --tmux-socket --tmux-program --tta-program --ssh --mosh )
+case $state in
+  backend) forward=( ${forward:#--session-backend} ) ;;
+  scaffold) forward=( ${forward:#--scaffold} ) ;;
+esac
+for option in "${forward[@]}"; do
+  if (( ${+opt_args[$option]} )); then
+    query+=( "$option" "${(Q)opt_args[$option]}" )
+  fi
+done
 
 if [[ $state == backend ]]; then
-  local -a backends
-  backends=( "${(@f)$(command "$program" --completion-candidates backends 2>/dev/null)}" )
+  backends=( "${(@f)$(command "$program" "${query[@]}" --completion-candidates backends 2>/dev/null)}" )
   backends=( "${(@)backends:#}" )
   _wanted backends expl 'compiled session backend' compadd -a backends && ret=0
 elif [[ $state == scaffold ]]; then
-  local -a generators
-  generators=( "${(@f)$(command "$program" --completion-candidates scaffolds 2>/dev/null)}" )
+  # The posture vocabulary is fixed; generator names come from the registry.
+  generators=( default false )
+  generators+=( "${(@f)$(command "$program" "${query[@]}" --completion-candidates scaffolds 2>/dev/null)}" )
   generators=( "${(@)generators:#}" )
-  _wanted scaffolds expl 'configured scaffold generator' compadd -a generators && ret=0
+  _wanted scaffolds expl 'scaffold posture or generator' compadd -a generators && ret=0
 elif [[ $state == target ]]; then
-  # Forward only lookup configuration, never an action or the typed fragment.
-  # _arguments accepts both --session-root VALUE and --session-root=VALUE,
-  # including quoting.
-  for option in --session-root --session-backend --tmux-socket --tmux-program --tta-program; do
-    if (( ${+opt_args[$option]} )); then
-      query+=( "$option" "${(Q)opt_args[$option]}" )
-    fi
-  done
   sessions=( "${(@f)$(command "$program" "${query[@]}" --completion-candidates sessions 2>/dev/null)}" )
   projects=( "${(@f)$(command "$program" "${query[@]}" --completion-candidates projects 2>/dev/null)}" )
   sessions=( "${(@)sessions:#}" )

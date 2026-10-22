@@ -49,7 +49,21 @@ pub fn normalize_local(launch: &mut LaunchConfig) -> eyre::Result<()> {
     if launch.tmux_mode().is_none() || launch.ssh.is_some() || launch.mosh.is_some() {
         return Ok(());
     }
-    let cwd = std::env::current_dir()?;
+    let socket = derive_socket(launch, &std::env::current_dir()?)?;
+    launch.tmux_socket = Some(
+        socket
+            .into_os_string()
+            .into_string()
+            .map_err(|_| eyre::eyre!("tmux socket path must be UTF-8"))?,
+    );
+    Ok(())
+}
+
+/// The endpoint a local launch — or a local read-only query such as
+/// completion — would use: explicit `--tmux-socket` frozen against `cwd`,
+/// then `$TMUX`'s server, then the conventional default. Shared so inventory
+/// and launch can never disagree about which server they mean.
+pub(crate) fn derive_socket(launch: &LaunchConfig, cwd: &Path) -> eyre::Result<PathBuf> {
     let socket = if let Some(socket) = &launch.tmux_socket {
         if socket.is_empty() {
             eyre::bail!("tmux socket path must not be empty");
@@ -68,13 +82,7 @@ pub fn normalize_local(launch: &mut LaunchConfig) -> eyre::Result<()> {
             .unwrap_or_else(|| PathBuf::from("/tmp"));
         cwd.join(base).join(format!("tmux-{}", nix::unistd::geteuid().as_raw())).join("default")
     };
-    launch.tmux_socket = Some(
-        socket
-            .into_os_string()
-            .into_string()
-            .map_err(|_| eyre::eyre!("tmux socket path must be UTF-8"))?,
-    );
-    Ok(())
+    Ok(socket)
 }
 
 /// Pure backend policy once executable presence has been observed. Availability
@@ -313,7 +321,9 @@ fn classic_remote_script(_: &LaunchConfig, _: &[String]) -> eyre::Result<String>
     eyre::bail!("classic tmux CLI backend was not compiled");
 }
 
-fn executable_present(program: &str) -> bool {
+/// Shared availability probe: completion asks the same question the launch
+/// worker answers here.
+pub(crate) fn executable_present(program: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
     let executable = |p: &Path| p.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
     if program.contains('/') {
@@ -417,8 +427,10 @@ fn embedded_tta(launch: &LaunchConfig, trailing: &[String]) -> eyre::Result<()> 
     std::process::exit(status.map(crate::session::exit_code_from_status).unwrap_or(0));
 }
 
-#[cfg(feature = "tta-lib")]
-fn project_root(launch: &LaunchConfig) -> Option<PathBuf> {
+/// Root precedence for tta project matching: `--session-root`, then
+/// `TTA_ROOT`, then home-relative `PROJECTS_DIR`, then `~/src`. Shared with
+/// completion so inventories and launches see the same projects.
+pub(crate) fn project_root(launch: &LaunchConfig) -> Option<PathBuf> {
     launch
         .session_root
         .as_ref()

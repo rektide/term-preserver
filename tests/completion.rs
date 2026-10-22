@@ -61,6 +61,15 @@ impl Drop for Server {
 }
 
 fn tper() -> Command {
+    let mut command = tper_base();
+    // Never read the operator's real config file from a test.
+    command.args(["--config", "/dev/null"]);
+    command
+}
+
+/// A `tper` invocation with hermetic environment but no --config yet, for
+/// tests that exercise an explicit config file of their own.
+fn tper_base() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tper"));
     for (key, _) in std::env::vars_os() {
         let encoded = key.as_encoded_bytes();
@@ -69,8 +78,6 @@ fn tper() -> Command {
         }
     }
     command.env_remove("TMUX").env_remove("TMUX_PANE");
-    // Never read the operator's real config file from a test.
-    command.args(["--config", "/dev/null"]);
     command
 }
 
@@ -279,6 +286,95 @@ fn tta_cli_scaffold_inventory_forwards_to_the_tta_program() {
         ),
         "alpha\nzeta\n"
     );
+}
+
+/// With both tta implementations compiled, an explicit `tta-cli` — selected
+/// through a real config file, with the tta program itself named there — must
+/// answer through that CLI even though the embedded registry could answer
+/// in-process. The inventory then matches what that launch would consult.
+#[cfg(all(feature = "tta-cli", feature = "tta-lib"))]
+#[test]
+fn scaffold_inventory_honors_explicit_tta_cli_and_configured_program_over_the_registry() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::Builder::new().prefix("tp-completion-").tempdir_in("/tmp/opencode").unwrap();
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let shim = bin.join("my-tta");
+    fs::write(
+        &shim,
+        "#!/bin/sh\n[ \"$1\" = --completion-candidates ] && [ \"$2\" = scaffolds ] && printf 'shim-zeta\\nshim-alpha\\n' && exit 0\nexit 64\n",
+    )
+    .unwrap();
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    // A loadable registry exists and would answer in-process names...
+    let registry = temp.path().join("tta-config.toml");
+    fs::write(&registry, "[scaffold.generators.registry]\nadapter = \"rekon\"\n").unwrap();
+    // ...but the config file selects the subprocess backend with its own tta.
+    let config = temp.path().join("config.toml");
+    fs::write(
+        &config,
+        format!("[launch]\nsession_backend = \"tta-cli\"\ntta_program = \"{}\"\n", shim.display()),
+    )
+    .unwrap();
+    assert_eq!(
+        names(
+            tper_base()
+                .env("TTA_CONFIG", &registry)
+                .arg("--config")
+                .arg(&config)
+                .args(["--completion-candidates", "scaffolds"]),
+        ),
+        "shim-alpha\nshim-zeta\n"
+    );
+}
+
+/// Inventories are local-only: a remote transport answers nothing, and the
+/// refusal must be observable as zero process contact — no ssh, no mosh, no
+/// tmux query against a local server a remote launch would never use.
+#[test]
+fn remote_transport_offers_no_host_inventory_and_never_contacts_a_host() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::Builder::new().prefix("tp-completion-").tempdir_in("/tmp/opencode").unwrap();
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    for name in ["ssh", "mosh", "tmux"] {
+        let shim = bin.join(name);
+        fs::write(&shim, format!("#!/bin/sh\nprintf 'contacted {name}\\n' >> \"$CONTACT_LOG\"\nexit 99\n")).unwrap();
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let log = temp.path().join("contact.log");
+    let mut dirs = vec![bin];
+    dirs.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+    let path = std::env::join_paths(dirs).unwrap();
+    for transport in ["--ssh", "--mosh"] {
+        for what in ["sessions", "projects", "scaffolds"] {
+            let output = tper()
+                .env("PATH", &path)
+                .env("CONTACT_LOG", &log)
+                .arg(transport)
+                .arg("elsewhere")
+                .arg("--tmux-program")
+                .arg("tmux")
+                .args(["--completion-candidates", what])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{} {}: {}", transport, what, String::from_utf8_lossy(&output.stderr));
+            assert!(output.stdout.is_empty(), "{transport} {what}: {}", String::from_utf8_lossy(&output.stdout));
+        }
+    }
+    // The compiled backend enum is host-independent and still answers.
+    let backends = tper()
+        .env("PATH", &path)
+        .env("CONTACT_LOG", &log)
+        .arg("--ssh")
+        .arg("elsewhere")
+        .arg("--completion-candidates=backends")
+        .output()
+        .unwrap();
+    assert!(backends.status.success());
+    assert!(String::from_utf8(backends.stdout).unwrap().contains("auto"));
+    // Nothing ever reached a transport or tmux.
+    assert!(!log.exists(), "a shim was contacted");
 }
 
 #[cfg(feature = "classic-tmux-cli")]

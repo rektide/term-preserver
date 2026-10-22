@@ -86,6 +86,8 @@ check 'tper --tmux-attach meta' 'tper --tmux-attach meta\[x\]\* '
 check 'tper --tmux quote' "tper --tmux quote\\'project "
 check 'tper --session-roo' 'tper --session-root='
 check 'tper --tta-progra' 'tper --tta-program='
+check 'tper --scaffold=fa' 'tper --scaffold=false '
+check 'tper --config /dev/null --tmux pipe' 'tper --config /dev/null --tmux pipewire-native '
 check "tper --session-root '$fixture/override root' --tmux oth" "tper --session-root '$fixture/override root' --tmux other-project "
 check "tper --session-root='$fixture/override root' --tmux oth" "tper --session-root='$fixture/override root' --tmux other-project "
 check 'tper --session-backend aut' 'tper --session-backend auto '
@@ -93,7 +95,10 @@ check "tper --tmux-socket '$socket_probe' --session-backend classic-tmux-cli --t
 check "tper --session-backend classic-tmux-cli --tmux-socket '$TPER_LIVE_SOCKET' --tmux live" "tper --session-backend classic-tmux-cli --tmux-socket '$TPER_LIVE_SOCKET' --tmux live-work "
 check "tper --session-backend classic-tmux-cli --tmux-socket '$TPER_LIVE_SOCKET' --tmux *work" "tper --session-backend classic-tmux-cli --tmux-socket '$TPER_LIVE_SOCKET' --tmux live-work "
 check "tper --session-backend classic-tmux-cli --tmux-socket '$fixture/bad-socket' --tmux wire" "tper --session-backend classic-tmux-cli --tmux-socket '$fixture/bad-socket' --tmux pipewire-native "
-# Inventory queries never create a socket: neither the probe endpoint nor the
-# pinned dead endpoint may exist afterwards.
+# A remote transport offers no host inventory: even with the live local socket
+# on the line, the query must neither offer its sessions nor contact anything.
+check "tper --ssh elsewhere --session-backend classic-tmux-cli --tmux-socket '$TPER_LIVE_SOCKET' --tmux liv" "tper --ssh elsewhere --session-backend classic-tmux-cli --tmux-socket '$TPER_LIVE_SOCKET' --tmux liv"
+# Inventory queries never create a socket and never contact a host: neither
+# the probe endpoint nor the pinned dead endpoint may exist afterwards.
 [[ ! -e $socket_probe ]]
 [[ ! -e $TERM_PRESERVER_LAUNCH__TMUX_SOCKET ]]

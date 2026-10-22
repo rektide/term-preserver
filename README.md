@@ -202,12 +202,21 @@ tper --session-backend aut<Tab> → tper --session-backend auto
 ```
 
 Candidates come from the binary itself through a hidden read-only
-`--completion-candidates` lane, so they reflect this build's compiled backends
-and the same root/socket/program configuration layers a launch uses (including
-`TERM_PRESERVER_LAUNCH__*` and `TTA_ROOT`/`PROJECTS_DIR`). Completion observes
-only: it never creates, attaches, or switches a session, never starts a server,
-and never runs a scaffold generator. The module prefers `tper` on PATH and
-falls back to `term-preserver`, so it works whichever name is installed.
+`--completion-candidates` lane. The widget forwards the lookup configuration
+already on the line — `--config`, `--session-root`, `--session-backend`,
+`--tmux-socket`, `--tmux-program`, `--tta-program`, and the transport
+selectors — so candidates reflect the same merged configuration a launch
+would use (including `TERM_PRESERVER_LAUNCH__*` and
+`TTA_ROOT`/`PROJECTS_DIR`); the option whose value is being completed never
+constrains its own candidates. `--scaffold=` completes the fixed
+`default`/`false` posture vocabulary plus configured generator names.
+Inventories are **local-only**: with `--ssh`/`--mosh` on the line the binary
+answers no host inventory rather than initiating a transport or silently
+querying the wrong local server; only the compiled backend list (which never
+contacts a host) still answers there. Completion observes only: it never
+creates, attaches, or switches a session, never starts a server, and never
+runs a scaffold generator. The module prefers `tper` on PATH and falls back
+to `term-preserver`, so it works whichever name is installed.
 
 First install the binaries with `cargo install --path .`. In your Zim
 configuration (`~/.zimrc`, or `$ZIM_CONFIG_FILE`), add the local module
@@ -230,7 +239,8 @@ literal exact/unique-substring matching.
 
 The [widget tests](tests/completion.rs) drive real Zsh completion in a private
 PTY against a private tmux socket under `/tmp/opencode`, plus the candidate
-protocol itself across feature combinations.
+protocol itself across feature combinations — including zero-contact proof
+that a remote transport answers nothing.
 
 ## Retry prompt
 

@@ -4,16 +4,20 @@
 //! empty session inventory), and never run a scaffold generator.
 //!
 //! Lookup configuration is the same merged [`LaunchConfig`] a launch uses, so
-//! an inventory honors `--session-root`, `--tmux-socket`, program overrides,
-//! and the ambient environment exactly as the real invocation would.
+//! an inventory honors `--session-root`, `--tmux-socket`, `--config`, program
+//! overrides, and the ambient environment exactly as the real invocation
+//! would. Inventories are **local-only**: a remote transport (`--ssh`/`--mosh`)
+//! answers with no host inventory rather than initiating a transport or
+//! silently querying the wrong local server. The compiled backend list stays
+//! available in every context because it never contacts a host.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use clap::ValueEnum;
 
 use crate::launch::LaunchConfig;
-use crate::launcher::SessionBackend;
+use crate::launcher::{derive_socket, executable_present, project_root, SessionBackend};
 
 /// Hidden `--completion-candidates` selection: one query per invocation,
 /// printed one name per line on stdout. Errors go to stderr and leave stdout
@@ -32,8 +36,25 @@ pub enum CompletionCandidates {
 
 impl CompletionCandidates {
     pub fn run(self, launch: &LaunchConfig) -> eyre::Result<()> {
+        if matches!(self, Self::Backends) {
+            // A compiled enum: host-independent, so even a remote context
+            // keeps this answer.
+            print_candidates(backend_names());
+            return Ok(());
+        }
+        if launch.ssh.is_some() || launch.mosh.is_some() {
+            // Read-only completion never initiates a transport, and the remote
+            // host's project root, tmux server and scaffold registry are not
+            // observable from here. Say so instead of querying local state a
+            // remote launch would never use.
+            eprintln!(
+                "term-preserver: completion inventories are local-only; no host inventory for {}",
+                if launch.ssh.is_some() { "--ssh" } else { "--mosh" }
+            );
+            return Ok(());
+        }
         match self {
-            Self::Backends => print_candidates(backend_names()),
+            Self::Backends => unreachable!("handled above"),
             Self::Projects => print_candidates(project_names(launch)?),
             Self::Sessions => print_candidates(session_names(launch)?),
             Self::Scaffolds => print_candidates(scaffold_names(launch)?),
@@ -70,27 +91,6 @@ fn backend_names() -> Vec<String> {
         .collect()
 }
 
-/// Root precedence mirrors launching (`launcher::project_root`):
-/// `--session-root` > `TTA_ROOT` > home-relative `PROJECTS_DIR` > `~/src`.
-fn project_root(launch: &LaunchConfig) -> Option<PathBuf> {
-    launch
-        .session_root
-        .as_ref()
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("TTA_ROOT").filter(|s| !s.is_empty()).map(PathBuf::from))
-        .or_else(|| {
-            let projects = std::env::var_os("PROJECTS_DIR")
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("src"));
-            if projects.is_absolute() {
-                Some(projects)
-            } else {
-                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(projects))
-            }
-        })
-}
-
 /// Sorted immediate project basenames. Directory symlinks count; dangling
 /// symlinks, regular files, deeper descendants, and non-UTF-8 names do not —
 /// the same policy as tta's project inventory.
@@ -121,69 +121,40 @@ fn project_names(launch: &LaunchConfig) -> eyre::Result<Vec<String>> {
     Ok(names)
 }
 
-/// Socket precedence mirrors `launcher::normalize_local`: explicit
-/// `--tmux-socket`, then `$TMUX`'s server, then the conventional default.
-/// Relative paths are frozen against the invocation cwd.
-fn local_socket(launch: &LaunchConfig) -> eyre::Result<PathBuf> {
-    let cwd = std::env::current_dir()?;
-    let socket = if let Some(socket) = launch.tmux_socket.as_deref() {
-        if socket.is_empty() {
-            eyre::bail!("tmux socket path must not be empty");
-        }
-        cwd.join(socket)
-    } else if let Some(socket) = std::env::var_os("TMUX")
-        .and_then(|s| s.into_string().ok())
-        .and_then(|s| s.split(',').next().filter(|s| !s.is_empty()).map(str::to_owned))
-    {
-        cwd.join(socket)
-    } else {
-        // An explicit path avoids client-specific TMUX_TMPDIR behavior.
-        let base = std::env::var_os("TMUX_TMPDIR")
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/tmp"));
-        cwd.join(base).join(format!("tmux-{}", nix::unistd::geteuid().as_raw())).join("default")
-    };
-    socket
-        .into_os_string()
-        .into_string()
-        .map(PathBuf::from)
-        .map_err(|_| eyre::eyre!("tmux socket path must be UTF-8"))
-}
-
-/// Mirrors the private `launcher::executable_present` availability probe.
-fn executable_present(program: &str) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    let executable = |p: &Path| p.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
-    if program.contains('/') {
-        return executable(Path::new(program));
-    }
-    std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|dir| executable(&dir.join(program))))
-}
-
 /// Completion-shaped availability: the same auto order `select_backend` uses
-/// for local launches, without target or transport policy (a widget only
-/// needs the inventory one backend would see).
-fn effective_backend(launch: &LaunchConfig) -> SessionBackend {
+/// for local launches, without target-action policy — a widget only needs the
+/// inventory one backend would see. Explicit choices are validated honestly:
+/// a backend this build did not compile is an error, never a silent fallback.
+fn effective_backend(launch: &LaunchConfig) -> eyre::Result<SessionBackend> {
     match launch.session_backend {
         SessionBackend::Auto => {
-            if cfg!(feature = "tta-lib") {
+            let selected = if cfg!(feature = "tta-lib") {
                 SessionBackend::TtaLib
             } else if cfg!(feature = "tta-cli") && executable_present(&launch.tta_program) {
                 SessionBackend::TtaCli
             } else if cfg!(feature = "classic-tmux-tmax") {
                 SessionBackend::ClassicTmuxTmax
-            } else {
+            } else if cfg!(feature = "classic-tmux-cli") {
                 SessionBackend::ClassicTmuxCli
-            }
+            } else {
+                return Err(eyre::eyre!(
+                    "no available session backend; enable a backend feature or install tta on the execution host"
+                ));
+            };
+            Ok(selected)
         }
-        backend => backend,
+        backend => {
+            if !backend.compiled() {
+                eyre::bail!("session backend {backend:?} was not compiled");
+            }
+            Ok(backend)
+        }
     }
 }
 
 fn session_names(launch: &LaunchConfig) -> eyre::Result<Vec<String>> {
-    let socket = local_socket(launch)?;
-    match effective_backend(launch) {
+    let socket = derive_socket(launch, &std::env::current_dir()?)?;
+    match effective_backend(launch)? {
         #[cfg(feature = "tta-lib")]
         SessionBackend::TtaLib => embedded_sessions(launch, &socket),
         #[cfg(feature = "tta-cli")]
@@ -281,28 +252,49 @@ fn cli_sessions(launch: &LaunchConfig, socket: &Path) -> eyre::Result<Vec<String
     Ok(String::from_utf8(output.stdout)?.lines().map(str::to_owned).collect())
 }
 
+/// The registry is tta's either way. The effective backend decides which
+/// window to use: an explicit `tta-cli` asks the installed CLI even when the
+/// embedded registry is compiled, so the inventory matches what that launch
+/// would actually consult.
 fn scaffold_names(launch: &LaunchConfig) -> eyre::Result<Vec<String>> {
-    // The registry is tta's either way: load it in-process when embedded,
-    // otherwise ask the installed CLI through the same candidate protocol.
-    #[cfg(feature = "tta-lib")]
-    {
-        let _ = launch;
-        let config = tta_launcher::scaffold::Config::load().map_err(tta_launcher::scaffold::Error::from)?;
-        Ok(config.names())
+    match effective_backend(launch) {
+        Ok(SessionBackend::TtaCli) => cli_scaffold_names(launch),
+        Ok(SessionBackend::TtaLib) => embedded_scaffold_names(),
+        // Classic or unresolved: either registry window still answers;
+        // prefer the in-process registry, else the CLI, else nothing.
+        _ => {
+            if cfg!(feature = "tta-lib") {
+                embedded_scaffold_names()
+            } else if cfg!(feature = "tta-cli") {
+                cli_scaffold_names(launch)
+            } else {
+                Ok(Vec::new())
+            }
+        }
     }
-    #[cfg(all(feature = "tta-cli", not(feature = "tta-lib")))]
-    {
-        let mut query = Command::new(&launch.tta_program);
-        query.args(["--completion-candidates", "scaffolds"]);
-        inventory_lines(query)
-    }
-    #[cfg(not(any(feature = "tta-lib", feature = "tta-cli")))]
-    {
-        let _ = launch;
-        // No tta implementation is compiled: there is no registry vocabulary
-        // to offer, and launching would reject --scaffold anyway.
-        Ok(Vec::new())
-    }
+}
+
+#[cfg(feature = "tta-lib")]
+fn embedded_scaffold_names() -> eyre::Result<Vec<String>> {
+    let config = tta_launcher::scaffold::Config::load().map_err(tta_launcher::scaffold::Error::from)?;
+    Ok(config.names())
+}
+
+#[cfg(not(feature = "tta-lib"))]
+fn embedded_scaffold_names() -> eyre::Result<Vec<String>> {
+    Ok(Vec::new())
+}
+
+#[cfg(feature = "tta-cli")]
+fn cli_scaffold_names(launch: &LaunchConfig) -> eyre::Result<Vec<String>> {
+    let mut query = Command::new(&launch.tta_program);
+    query.args(["--completion-candidates", "scaffolds"]);
+    inventory_lines(query)
+}
+
+#[cfg(not(feature = "tta-cli"))]
+fn cli_scaffold_names(_launch: &LaunchConfig) -> eyre::Result<Vec<String>> {
+    eyre::bail!("tta scaffold inventory requires the tta-cli feature")
 }
 
 #[cfg(feature = "tta-cli")]

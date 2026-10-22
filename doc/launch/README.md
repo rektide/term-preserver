@@ -200,12 +200,18 @@ so a short-lived attempt can finish before it is sampled.
 
 The hidden `--completion-candidates {backends,projects,sessions,scaffolds}`
 lane feeds the [Zsh/Zim module](/README.md#zsh--zim-completion) and observes
-the same merged launch configuration. Session inventories follow the effective
-backend exactly as this guide resolves it: embedded native or `TTA_BACKEND=cli`
-lookup for `tta-lib`, the installed tta's own candidate protocol for `tta-cli`,
-native or CLI discovery for the classic backends, with the auto availability
-order above. An absent server is an empty inventory — a query never starts one
-— and errors go to stderr leaving stdout empty so widgets can silence them.
+the same merged launch configuration, including an explicit `--config` and
+program overrides. Session inventories follow the effective backend exactly
+as this guide resolves it — an explicit `tta-cli` asks the installed tta's
+own candidate protocol even when the embedded registry is compiled:
+embedded native or `TTA_BACKEND=cli` lookup for `tta-lib`, native or CLI
+discovery for the classic backends, with the auto availability order above.
+An absent server is an empty inventory — a query never starts one — and
+errors go to stderr leaving stdout empty so widgets can silence them.
+Inventories are local-only: `--ssh`/`--mosh` answer with no host inventory
+(and zero process contact) rather than querying local state a remote launch
+would never use; the compiled backend list stays available everywhere
+because it never contacts a host.
 
 ## Related accounts
 
