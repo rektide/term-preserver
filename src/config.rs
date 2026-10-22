@@ -138,6 +138,12 @@ pub struct CliArgs {
     #[arg(long, help = "Attach to existing tmux session")]
     pub tmux_attach: Option<String>,
 
+    #[arg(
+        long,
+        help = "Disable tmux session grouping: --tmux attaches to an existing session instead of joining its group"
+    )]
+    pub no_tmux_group: bool,
+
     #[arg(long, help = "Working directory for innermost layer")]
     pub dir: Option<String>,
 
@@ -182,6 +188,8 @@ struct LaunchOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     tmux_attach: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    tmux_group: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     login: Option<bool>,
@@ -207,6 +215,11 @@ impl From<CliArgs> for CliOverlay {
             tmux: args.tmux,
             tmux_create: args.tmux_create,
             tmux_attach: args.tmux_attach,
+            tmux_group: if args.no_tmux_group {
+                Some(false)
+            } else {
+                None
+            },
             dir: args.dir,
             login: if args.no_login { Some(false) } else { None },
             interactive: if args.no_interactive {
@@ -372,6 +385,30 @@ command = ["/bin/from-file"]
         let cli = make_cli(&["--config", "/dev/null", "--no-login"]);
         let config = load_config(cli).unwrap();
         assert!(!config.launch.login);
+    }
+
+    #[test]
+    fn cli_launch_tmux_group_defaults_on() {
+        let cli = make_cli(&["--config", "/dev/null"]);
+        let config = load_config(cli).unwrap();
+        assert!(config.launch.tmux_group);
+    }
+
+    #[test]
+    fn cli_no_tmux_group_maps_to_false() {
+        let cli = make_cli(&["--config", "/dev/null", "--no-tmux-group"]);
+        let config = load_config(cli).unwrap();
+        assert!(!config.launch.tmux_group);
+    }
+
+    #[test]
+    fn tmux_group_disabled_from_toml() {
+        let mut tmp = NamedTempFile::new().unwrap();
+        use std::io::Write;
+        tmp.write_all(b"[launch]\ntmux_group = false\n").unwrap();
+        let cli = make_cli(&["--config", tmp.path().to_str().unwrap()]);
+        let config = load_config(cli).unwrap();
+        assert!(!config.launch.tmux_group);
     }
 
     #[test]

@@ -41,7 +41,9 @@ Reconnect to a remote tmux session over mosh — the headline use case:
     term-preserver --mosh w --tmux compfuzor
 
 When that mosh link drops and the child exits, press space at the prompt to
-re-run the *same* resolved command: mosh redials and tmux re-attaches.
+re-run the *same* resolved command: mosh redials and tmux re-attaches — or, with
+the default [session grouping](#session-groups), joins the session's group with
+an independent view of the same windows.
 
 ## Session launcher
 
@@ -59,12 +61,13 @@ shell        (innermost)   →  which shell binary, and how it's invoked
 | `--shell <name>` | Shell override (path or basename) |
 | `--ssh <host>` | SSH transport (mutually exclusive with `--mosh`) |
 | `--mosh <host>` | mosh transport (mutually exclusive with `--ssh`) |
-| `--tmux <session>` | Create *or* attach (`tmux new -As`) |
+| `--tmux <session>` | Create *or join the session's group* (see [session groups](#session-groups)) |
 | `--tmux-create <session>` | Create only (`tmux new -s`) |
 | `--tmux-attach <session>` | Attach only (`tmux attach-session -t`) |
 | `--dir <path>` | Working directory for the innermost layer |
 | `--no-login` | Drop login-shell mode (default: login) |
 | `--no-interactive` | Drop interactive mode (default: interactive) |
+| `--no-tmux-group` | Plain create-or-attach (`tmux new -As`); for tmux < 3.4 or shared view |
 
 The three `--tmux*` flags are mutually exclusive, as are `--ssh`/`--mosh`. A
 trailing `-- <command>` becomes the innermost job: it runs *inside* tmux when a
@@ -73,16 +76,53 @@ tmux flag is present, otherwise directly under the shell.
 If none of these flags are given, the launcher is inert and the legacy
 `-- <command>` path (or `$SHELL`) is used unchanged.
 
+### Session groups
+
+Two terminals attached to the *same* tmux session share one current window:
+switching windows in one switches them in both, because in tmux the current
+window belongs to the session, not to each client. `--tmux` avoids this by
+default (tmux ≥ 3.4):
+
+- **First run** (no such session) creates the suffix-less primary — exactly
+  `tmux new -As <session>`.
+- **Later runs** probe `tmux has-session` *at run time* and, when the primary
+  exists, join its group instead of attaching: the new session (`dev-1`,
+  `dev-2`, …) shares the same windows but keeps its **own current window**, so
+  each terminal navigates independently. It also sets
+  `destroy-unattached keep-last` on itself, so it quits when its client
+  detaches while the group still has members — the primary survives and keeps
+  the windows alive across reconnects.
+
+On a POSIX shell the resolved inner command is:
+
+```sh
+if tmux has-session -t '=dev' 2>/dev/null; \
+   then exec tmux new -t dev \; set destroy-unattached keep-last; \
+   else exec tmux new -As dev; fi
+```
+
+The probe uses `-t '=dev'` (exact name match) so a lingering `dev-3` satellite
+never satisfies it — and the quotes are required for zsh, whose `=command`
+expansion would otherwise reject the bare `=dev` word. The condition
+re-evaluates on every retry or manual re-run — locally or on the remote host
+under ssh/mosh. A trailing `-- <command>` applies to the fresh primary's
+initial window only. fish gets the equivalent `if`/`end` form; nushell and the
+`$SHELL`-probing fallback degrade to plain `new -As` (no local binary to
+verify a nushell conditional against). `--no-tmux-group` (or
+`[launch] tmux_group = false`) opts out everywhere; `--tmux-attach` remains
+the explicit "I want the shared view" flag.
+
 ### What each invocation resolves to
 
 | You run | Resolved command |
 |---------|------------------|
 | `term-preserver` | `zsh -li` |
 | `--shell bash` | `bash -li` |
-| `--tmux dev` | `zsh -li -c 'exec tmux new -As dev'` |
-| `--mosh w --tmux compfuzor` | `mosh w -- zsh -li -c 'exec tmux new -As compfuzor'` |
-| `--ssh w --tmux dev` | `ssh -t w "zsh -li -c 'exec tmux new -As dev'"` |
-| `--mosh w --shell nu --tmux dev` | `mosh w -- nu -c 'tmux new -As dev'` |
+| `--tmux dev` | `zsh -li -c "if tmux has-session -t '=dev' 2>/dev/null; then exec tmux new -t dev \; set destroy-unattached keep-last; else exec tmux new -As dev; fi"` |
+| `--tmux dev --no-tmux-group` | `zsh -li -c 'exec tmux new -As dev'` |
+| `--mosh w --tmux compfuzor` | `mosh w -- zsh -li -c 'if tmux has-session -t '\''=compfuzor'\'' 2>/dev/null … else exec tmux new -As compfuzor; fi'` |
+| `--ssh w --tmux dev` | `ssh -t w "zsh -li -c 'if tmux has-session -t '\''=dev'\'' 2>/dev/null … else exec tmux new -As dev; fi'"` |
+| `--mosh w --shell nu --tmux dev` | `mosh w -- nu -c 'tmux new -As dev'` (nushell: no grouping) |
 | `--dir ~/src/foo` | `zsh -c 'cd ~/src/foo && exec zsh -li'` |
 | `--dir ~/src/foo -- make test` | `zsh -li -c 'cd ~/src/foo && exec make test'` |
 | `--ssh w` | `ssh -t w 'zsh -li'` |
@@ -233,7 +273,7 @@ Config loads via [figment2](https://docs.rs/figment2) with precedence:
 | `--shutdown-signals <sig…>` | Signals that also shut the proxy down | _(empty)_ |
 | `--reemit-title <bool>` | Re-emit captured OSC state (title/icon/color) on child exit | `false` |
 | `--print-gone-title <bool>` | Print `gone <title> (pid N)` on child exit | `false` |
-| `--shell` / `--ssh` / `--mosh` / `--tmux*` / `--dir` / `--no-login` / `--no-interactive` | [Session launcher](#session-launcher) | _none_ |
+| `--shell` / `--ssh` / `--mosh` / `--tmux*` / `--dir` / `--no-login` / `--no-interactive` / `--no-tmux-group` | [Session launcher](#session-launcher) | _none_ |
 | `-- <command…>` | Child command (trailing args) | `$SHELL` |
 
 `title_filters` and `[tmux] sources` are configured via the config file (TOML)
@@ -263,6 +303,7 @@ tmux = "compfuzor"
 dir = "~/src/foo"
 login = true
 interactive = true
+tmux_group = true
 
 [tmux]
 sources = ["poll"]
