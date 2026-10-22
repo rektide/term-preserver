@@ -103,6 +103,9 @@ pub struct CliArgs {
     pub session_backend: Option<SessionBackend>,
     #[arg(long, help = "tta project root (otherwise TTA_ROOT / PROJECTS_DIR / ~/src)")]
     pub session_root: Option<String>,
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "default",
+        help = "tta scaffold generator: default, a configured name, or false (otherwise TTA_SCAFFOLD / default)")]
+    pub scaffold: Option<String>,
     #[arg(long, help = "Explicit tmux socket path on the execution host")]
     pub tmux_socket: Option<String>,
     #[arg(long, help = "tmux client executable")]
@@ -186,6 +189,8 @@ struct LaunchOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     session_root: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    scaffold: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tmux_socket: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tmux_program: Option<String>,
@@ -228,6 +233,7 @@ impl From<CliArgs> for CliOverlay {
             tta: args.tta,
             session_backend: args.session_backend,
             session_root: args.session_root,
+            scaffold: args.scaffold,
             tmux_socket: args.tmux_socket,
             tmux_program: args.tmux_program,
             tta_program: args.tta_program,
@@ -374,6 +380,7 @@ command = ["/bin/from-file"]
     }
 
     #[test]
+    #[serial]
     fn session_backend_cli_overrides_file_without_inventing_startup_command() {
         let mut tmp = NamedTempFile::new().unwrap();
         use std::io::Write;
@@ -393,6 +400,28 @@ command = ["/bin/from-file"]
         assert_eq!(config.launch.session_root.as_deref(), Some("/projects"));
         assert_eq!(config.launch.tmux_socket.as_deref(), Some("/private/sock"));
         assert!(config.command.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn scaffold_choice_overlays_file_and_preserves_named_or_bare_values() {
+        let mut tmp = NamedTempFile::new().unwrap();
+        use std::io::Write;
+        tmp.write_all(b"[launch]\nscaffold = 'named'\n").unwrap();
+        let path = tmp.path().to_str().unwrap();
+        assert_eq!(load_config(make_cli(&["--config", path])).unwrap().launch.scaffold.as_deref(), Some("named"));
+        assert_eq!(
+            load_config(make_cli(&["--config", path, "--scaffold=false"]))
+                .unwrap()
+                .launch
+                .scaffold
+                .as_deref(),
+            Some("false")
+        );
+        assert_eq!(
+            load_config(make_cli(&["--config", path, "--scaffold"])).unwrap().launch.scaffold.as_deref(),
+            Some("default")
+        );
     }
 
     #[test]

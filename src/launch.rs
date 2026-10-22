@@ -85,6 +85,8 @@ pub struct LaunchConfig {
     #[serde(default)]
     pub session_root: Option<String>,
     #[serde(default)]
+    pub scaffold: Option<String>,
+    #[serde(default)]
     pub tmux_socket: Option<String>,
     #[serde(default = "default_tmux_program")]
     pub tmux_program: String,
@@ -124,6 +126,7 @@ impl Default for LaunchConfig {
             tta: None,
             session_backend: SessionBackend::Auto,
             session_root: None,
+            scaffold: None,
             tmux_socket: None,
             tmux_program: default_tmux_program(),
             tta_program: default_tta_program(),

@@ -119,14 +119,11 @@ pub fn select_backend(launch: &LaunchConfig, tta_present: bool) -> eyre::Result<
 pub fn prepare(launch: &LaunchConfig, trailing: &[String], env_shell: Option<&str>) -> eyre::Result<CommandSpec> {
     launch.validate()?;
     if launch.tmux_mode().is_none() {
-        return launch.resolve(trailing, env_shell);
+        return launch.resolve_shell_command(trailing, env_shell);
     }
     // Validate feature/operation compatibility here; executable presence is
     // resolved later, in the child's login environment or on the remote host.
     select_backend(launch, true)?;
-    if launch.session_backend != SessionBackend::Auto && !launch.session_backend.compiled() {
-        eyre::bail!("session backend {:?} was not compiled", launch.session_backend);
-    }
     let remote = launch.ssh.is_some() || launch.mosh.is_some();
     let command = if remote {
         remote_command(launch, trailing)?
@@ -170,13 +167,30 @@ pub fn prepare(launch: &LaunchConfig, trailing: &[String], env_shell: Option<&st
             .collect::<Vec<_>>()
             .join(" ")
     } else if matches!(family, "nu" | "nushell") {
-        // Nu's JSON double-quoted string escapes preserve argv, including dollars.
-        format!("^{}", command.iter().map(|s| serde_json::to_string(s).unwrap()).collect::<Vec<_>>().join(" "))
+        format!("^{}", command.iter().map(|s| nu_quote(s)).collect::<Vec<_>>().join(" "))
     } else {
         format!("exec {script}")
     };
     argv.push(if family == "fish" { format!("exec {script}") } else { script });
     CommandSpec::try_from(wrap_transport(argv, launch.ssh.as_deref(), launch.mosh.as_deref()))
+}
+
+// Nu double-quoted strings are literal (interpolation requires a leading $).
+// Unicode escapes use \u{HEX}, not JSON's \uHHHH form:
+// https://www.nushell.sh/book/working_with_strings.html#double-quoted-strings
+fn nu_quote(value: &str) -> String {
+    use std::fmt::Write;
+    let mut quoted = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            ch if ch.is_control() => write!(&mut quoted, "\\u{{{:x}}}", ch as u32).unwrap(),
+            ch => quoted.push(ch),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 fn tta_argv(launch: &LaunchConfig, trailing: &[String]) -> Vec<String> {
@@ -188,18 +202,50 @@ fn tta_argv(launch: &LaunchConfig, trailing: &[String]) -> Vec<String> {
         args.extend(["--socket-path".into(), socket.clone()]);
     }
     args.extend(["--tmux".into(), launch.tmux_program.clone()]);
+    if let Some(choice) = &launch.scaffold {
+        args.push(format!("--scaffold={choice}"));
+    }
     if launch.tmux_group {
         args.push("--group".into());
     }
     if let Some(dir) = &launch.dir {
         args.extend(["--dir".into(), dir.clone()]);
     }
-    // The positional fragment precedes a -- which protects startup arguments.
-    // A leading '-' fragment is a positional as well, so put all after --.
+    // Both the fragment and startup arguments follow --, protecting even a
+    // leading '-' fragment from option parsing.
     args.push("--".into());
     args.push(launch.tmux_mode().expect("session target").session().to_owned());
     args.extend(trailing.iter().cloned());
     args
+}
+
+fn tta_remote_argv(launch: &LaunchConfig, trailing: &[String]) -> Vec<String> {
+    let argv = tta_argv(launch, trailing);
+    if launch.scaffold.is_some() {
+        return argv;
+    }
+    // Resolve the default in the execution host's environment, independently of
+    // the installed CLI's scaffold-by-default build feature.
+    vec![
+        "sh".into(),
+        "-c".into(),
+        format!(
+            "exec {} --scaffold=\"${{TTA_SCAFFOLD:-default}}\" {}",
+            shell_quote(&argv[0]),
+            shell_join(&argv[1..])
+        ),
+    ]
+}
+
+fn scaffold_choice(launch: &LaunchConfig) -> eyre::Result<String> {
+    if let Some(choice) = &launch.scaffold {
+        return Ok(choice.clone());
+    }
+    match std::env::var("TTA_SCAFFOLD") {
+        Ok(value) if !value.is_empty() => Ok(value),
+        Ok(_) | Err(std::env::VarError::NotPresent) => Ok("default".into()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn remote_command(launch: &LaunchConfig, trailing: &[String]) -> eyre::Result<Vec<String>> {
@@ -212,7 +258,7 @@ fn remote_command(launch: &LaunchConfig, trailing: &[String]) -> eyre::Result<Ve
         cfg!(feature = "tta-cli") && launch.tmux_create.is_none() && launch.tmux_attach.is_none() && matches!(launch.session_backend, Auto | TtaCli);
     if launch.session_backend == TtaCli {
         select_backend(launch, true)?;
-        return Ok(tta_argv(launch, trailing));
+        return Ok(tta_remote_argv(launch, trailing));
     }
     let fallback_script = match fallback {
         Ok(ClassicTmuxCli) => classic_remote_script(launch, trailing)?,
@@ -224,7 +270,7 @@ fn remote_command(launch: &LaunchConfig, trailing: &[String]) -> eyre::Result<Ve
         format!(
             "if command -v {} >/dev/null 2>&1; then exec {}; else {}; fi",
             shell_quote(&launch.tta_program),
-            shell_join(&tta_argv(launch, trailing)),
+            shell_join(&tta_remote_argv(launch, trailing)),
             fallback_script
         )
     } else {
@@ -241,7 +287,7 @@ fn classic_remote_script(launch: &LaunchConfig, trailing: &[String]) -> eyre::Re
     let primary = classic_argv(launch, trailing, None)?;
     if matches!(mode, TmuxMode::CreateOrAttach(_)) && launch.tmux_group {
         let mut probe = base;
-        probe.extend(["has-session".into(), "-t".into(), format!("={}", mode.session())]);
+        probe.extend(["has-session".into(), "-t".into(), tmux_word(&format!("={}", mode.session()))]);
         let satellite = classic_argv(launch, trailing, Some(&format!("={}", mode.session())))?;
         Ok(format!(
             "if {} 2>/dev/null; then exec {}; else exec {}; fi",
@@ -273,6 +319,9 @@ pub fn execute_worker(json: &str) -> eyre::Result<()> {
     let Request { mut launch, trailing } = serde_json::from_str(json)?;
     launch.validate()?;
     let backend = select_backend(&launch, executable_present(&launch.tta_program))?;
+    if matches!(backend, SessionBackend::TtaLib | SessionBackend::TtaCli) {
+        launch.scaffold = Some(scaffold_choice(&launch)?);
+    }
     // Normalize even for direct library callers of the worker entrypoint.
     normalize_local(&mut launch)?;
     ensure_default_socket_directory(&launch)?;
@@ -354,7 +403,7 @@ fn embedded_tta(launch: &LaunchConfig, trailing: &[String]) -> eyre::Result<()> 
         .maybe_config(config.as_deref())
         .call()?;
     let status = expression.execute(tta_command::Handoff::Exec)?;
-    std::process::exit(status.and_then(|s| s.code()).unwrap_or(0));
+    std::process::exit(status.map(crate::session::exit_code_from_status).unwrap_or(0));
 }
 
 #[cfg(feature = "tta-lib")]
@@ -395,6 +444,14 @@ fn tmux_argv(launch: &LaunchConfig) -> Vec<String> {
 }
 
 #[cfg(feature = "classic-tmux")]
+fn tmux_word(word: &str) -> String {
+    match word.strip_suffix(';') {
+        Some(prefix) => format!("{prefix}\\;"),
+        None => word.to_owned(),
+    }
+}
+
+#[cfg(feature = "classic-tmux")]
 fn classic_argv(launch: &LaunchConfig, trailing: &[String], existing: Option<&str>) -> eyre::Result<Vec<String>> {
     let mode = launch.tmux_mode().expect("session target");
     validate_name(mode.session())?;
@@ -432,9 +489,7 @@ fn classic_argv(launch: &LaunchConfig, trailing: &[String], existing: Option<&st
     };
     for (index, arg) in argv.iter_mut().enumerate().skip(command_start) {
         if Some(index) != separator {
-            if let Some(prefix) = arg.strip_suffix(';') {
-                *arg = format!("{prefix}\\;");
-            }
+            *arg = tmux_word(arg);
         }
     }
     Ok(argv)
@@ -487,6 +542,23 @@ fn cli_existing(launch: &LaunchConfig, name: &str) -> eyre::Result<Option<String
         .filter_map(|line| line.split_once('\t'))
         .find(|(_, n)| *n == name)
         .map(|(id, _)| id.to_owned()))
+}
+
+#[cfg(feature = "classic-tmux-tmax")]
+fn native_existing(launch: &LaunchConfig, name: &str) -> eyre::Result<Option<String>> {
+    use tmax::error::OperationError;
+    let endpoint = tmax::endpoint::Tmux::new().socket_path(launch.tmux_socket.as_ref().unwrap());
+    let sessions = match endpoint.query(tmax::query::Sessions::new()) {
+        Ok(sessions) => sessions,
+        Err(OperationError::ServerConnection { source, .. })
+            if matches!(source.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) =>
+        {
+            return Ok(None)
+        }
+        Err(OperationError::Rejected(d)) if d.return_code == Some(1) && !d.truncated && d.body.is_empty() && d.stderr == b"no sessions\n" => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(sessions.into_iter().find(|s| s.name == name).map(|s| s.session_id.to_string()))
 }
 
 #[cfg(test)]
@@ -616,21 +688,42 @@ mod tests {
         assert!(group.iter().any(|s| s == ";"));
         assert!(!group.iter().any(|s| s == "ignored"));
     }
-}
 
-#[cfg(feature = "classic-tmux-tmax")]
-fn native_existing(launch: &LaunchConfig, name: &str) -> eyre::Result<Option<String>> {
-    use tmax::error::OperationError;
-    let endpoint = tmax::endpoint::Tmux::new().socket_path(launch.tmux_socket.as_ref().unwrap());
-    let sessions = match endpoint.query(tmax::query::Sessions::new()) {
-        Ok(sessions) => sessions,
-        Err(OperationError::ServerConnection { source, .. })
-            if matches!(source.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) =>
-        {
-            return Ok(None)
-        }
-        Err(OperationError::Rejected(d)) if d.return_code == Some(1) && !d.truncated && d.body.is_empty() && d.stderr == b"no sessions\n" => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    Ok(sessions.into_iter().find(|s| s.name == name).map(|s| s.session_id.to_string()))
+    #[cfg(feature = "classic-tmux-cli")]
+    #[test]
+    fn remote_classic_probe_and_group_preserve_shell_and_tmux_metacharacters() {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all("/tmp/opencode").unwrap();
+        let dir = tempfile::Builder::new().prefix("tp-remote-argv-").tempdir_in("/tmp/opencode").unwrap();
+        let client = dir.path().join("fake tmux");
+        let probe = dir.path().join("probe");
+        let group = dir.path().join("group");
+        std::fs::write(&client, "#!/bin/sh\ncase \"$1\" in\nhas-session) printf '%s\\0' \"$@\" > \"$PROBE\";;\nnew-session) printf '%s\\0' \"$@\" > \"$GROUP\";;\n*) exit 91;;\nesac\n").unwrap();
+        std::fs::set_permissions(&client, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let launch = LaunchConfig {
+            tmux: Some("a'$(false);".into()),
+            tmux_program: client.to_str().unwrap().into(),
+            ..Default::default()
+        };
+        let script = classic_remote_script(&launch, &["ignored startup".into()]).unwrap();
+        let status = Command::new("sh")
+            .args(["-c", &script])
+            .env("PROBE", &probe)
+            .env("GROUP", &group)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let words = |path| {
+            String::from_utf8(std::fs::read(path).unwrap())
+                .unwrap()
+                .split_terminator('\0')
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(words(probe), ["has-session", "-t", "=a'$(false)\\;"]);
+        assert_eq!(
+            words(group),
+            ["new-session", "-t", "=a'$(false)\\;", ";", "set-option", "destroy-unattached", "keep-last"]
+        );
+    }
 }

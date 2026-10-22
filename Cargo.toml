@@ -34,8 +34,9 @@ classic-tmux-tmax = ["classic-tmux", "dep:tmax"]
 regex = ["dep:regex"]
 ## Enable tmux session introspection: a per-session sampler polls the local
 ## tmux server and fills the `tmux` slot in `SessionExit`. Without this feature,
-## `TmuxSampler::start` is a no-op stub and the slot stays empty — no `tmux`
-## subprocess is ever spawned. The slot types (`TmuxSample`/`TmuxState`) remain
+## `TmuxSampler::start` is a no-op stub and the slot stays empty — no
+## introspection thread or subprocess is spawned. Launch backends are separate.
+## The slot types (`TmuxSample`/`TmuxState`) remain
 ## so the rest of the system is uniform either way.
 tmux = []
 
