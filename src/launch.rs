@@ -409,8 +409,9 @@ impl LaunchConfig {
     /// [`crate::launcher::prepare`] for backend selection and policy — there
     /// is no classic-renderer fallback; an unavailable backend is an error.
     /// `env_shell` is the caller's `$SHELL` (read in the imperative shell), used
-    /// only when neither `--shell` nor a config shell is set. Passing it in keeps
-    /// this resolution pipeline pure and deterministic in tests.
+    /// only when neither `--shell` nor a config shell is set. Shell-only
+    /// resolution is pure; local session preparation also freezes the endpoint
+    /// and worker executable without querying the server.
     pub fn resolve(&self, trailing: &[String], env_shell: Option<&str>) -> eyre::Result<CommandSpec> {
         crate::launcher::prepare(self, trailing, env_shell)
     }

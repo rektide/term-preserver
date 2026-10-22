@@ -420,8 +420,8 @@ Each resource with a distinct lifetime gets a small owner:
 - **`PromptPolicy`** — pure function mapping prompt keystrokes to retry/exit
   decisions. Testable without spawning the binary.
 - **`LaunchConfig`** — configuration for the composable launch flags
-  (`--shell`, `--ssh`, `--mosh`, `--tmux`, `--dir`) into a `CommandSpec`. Reads
-  shell-only resolution is pure; session workers resolve on each attempt. Also derives a focused
+  (`--shell`, `--ssh`, `--mosh`, `--tmux`, `--dir`). Shell-only command
+  resolution is pure; session workers resolve on each attempt. Also derives a focused
   `LaunchContext` (tmux target + transport) that moves through execution to feed
   the sampler — only a *local* tmux server is reachable by the local `tmux`
   binary, so remote transports yield no sample.
