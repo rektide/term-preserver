@@ -21,7 +21,8 @@ use term_preserver::launcher::{normalize_local, prepare, select_backend, Session
 
 const TMUX: &str = "/usr/bin/tmux";
 /// Sibling tta CLI build, used through `--tta-program` (never installed).
-const TTA: &str = "/home/rektide/src/tta/target/debug/tta";
+/// Resolved relative to this manifest: the tta checkout sits beside this one.
+const TTA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tta/target/debug/tta");
 const DEADLINE: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(50);
 
