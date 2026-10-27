@@ -53,14 +53,16 @@ remove classic launch support; enabling `classic-tmux` alone supplies no backend
 The separate existing `tmux` feature controls introspection, not launching.
 Its sample types remain available when observation is disabled.
 
-Default features are `regex,tmux,tta-cli,classic-tmux-cli`. The native/embedded
-implementations are opt-in builds:
+Default features are `regex,tmux,tta-lib,tta-cli,classic-tmux-cli,classic-tmux-tmax`:
+all four launch implementations compile, embedded tta is the first local
+choice, the tta CLI handles remote transports, and classic covers
+create/attach-only flags and remote fallback. Because `tta-lib` and
+`classic-tmux-tmax` resolve sibling path dependencies, default builds need the
+sibling checkouts; a crates.io publish would have to drop both from defaults.
+Slim builds select backend subsets explicitly:
 
 ```sh
-# All four implementations, with runtime selection:
-cargo build --all-features
-
-# Embedded tta only: classic launch support excluded:
+# Embedded tta only, classic launch support excluded:
 cargo build --no-default-features --features regex,tmux,tta-lib
 
 # Subprocess tta only:
