@@ -408,21 +408,18 @@ fn embedded_ssh(launch: &LaunchConfig, trailing: &[String], ssh_options: Vec<Str
         .startup(trailing.iter().map(Into::into).collect())
         .maybe_directory(launch.dir.as_ref().map(Into::into))
         .build();
-    let prepared = tta_runner::ssh::prepare(ssh, setup, options, tta_runner::capture::Limits::default())?;
-    // Keep probe diagnostics off the framed stdout and visible in the PTY log.
-    use std::io::Write;
-    for record in &prepared.observations {
-        if let Ok(decoded) = &record.decoded {
-            for bytes in [
-                &decoded.diagnostics.startup_stdout,
-                &decoded.diagnostics.trailing_stdout,
-                &decoded.diagnostics.transport_stderr,
-                &decoded.diagnostics.command_stderr,
-            ] {
-                std::io::stderr().write_all(bytes)?;
+    let prepared = match tta_runner::ssh::prepare(ssh, setup, options, tta_runner::capture::Limits::default()) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            if let Err(write_error) = tta_runner::ssh::write_diagnostics(std::io::stderr().lock(), &error.observations) {
+                // Retain the planning cause even if the diagnostic sink failed.
+                eprintln!("cannot write SSH probe diagnostics: {write_error}");
             }
+            return Err(error.into());
         }
-    }
+    };
+    // Keep probe diagnostics off the framed stdout and visible in the PTY log.
+    tta_runner::ssh::write_diagnostics(std::io::stderr().lock(), &prepared.observations)?;
     // No backend fallback after this boundary. A transport failure may follow
     // mutation; proxy/retry policy is still owned by term-preserver.
     let status = tta_command::Expression::from(prepared.command()?).execute(tta_command::Handoff::Exec)?;
