@@ -7,6 +7,8 @@ status: implemented
 author: model:openai/gpt-6-astra
 date: 2026-10-22
 sources:
+  - resource: opencode://ses_e80ce13ddffeiWXfWVMBW9qXv5
+    title: Document embedded SSH local-worker planning and prepared terminal handoff without target tta while retaining existing mosh behavior
   - resource: opencode://ses_e9b53ce88ffeghFZjnj3tsWYCr
     title: Document selectable tta and classic tmux backends and their shared launch surface
   - resource: opencode://ses_e9a9a3c0cffeZZGrwYvVEDokp0
@@ -144,7 +146,9 @@ never satisfies it — and the quotes are required for zsh, whose `=command`
 expansion would otherwise reject the bare `=dev` word. The condition
 re-evaluates on every retry or manual re-run — locally or on the remote host
 under ssh/mosh. A trailing `-- <command>` applies to the fresh primary's
-initial window only. Local attempts use a launch worker; remote conditional
+initial window only. Local and embedded SSH attempts use a local launch worker;
+embedded SSH runs read-only target probes and prepares the action locally without
+requiring target tta. Legacy remote conditional
 commands use a POSIX carrier beneath the selected shell. `--no-tmux-group` (or
 `[launch] tmux_group = false`) opts out everywhere; `--tmux-attach` remains
 the explicit "I want the shared view" flag.
@@ -159,7 +163,7 @@ the explicit "I want the shared view" flag.
 | `--tmux dev --no-tmux-group` | Share the existing session's current window |
 | `--tmux dev --session-backend classic-tmux-cli` | Exact-name classic create/group |
 | `--mosh w --tmux compfuzor` | Select available CLI backend on `w` |
-| `--ssh w --tmux dev` | SSH PTY transport with remote backend selection |
+| `--ssh w --tmux dev` | Prefer embedded SSH planning; no target tta required |
 | `--dir ~/src/foo -- make test` | Run the command in the directory through the shell |
 
 Session attempts use the worker or remote availability carrier described in
@@ -167,7 +171,8 @@ Session attempts use the worker or remote availability carrier described in
 
 Notes:
 
-- **ssh vs mosh transport differ.** `--ssh` adds `-t` (ssh suppresses remote PTY
+- **ssh vs mosh transport differ.** Embedded SSH probes use `-T` and its terminal
+  handoff uses `-tt`; legacy `--ssh` carriers add `-t` (ssh suppresses remote PTY
   allocation whenever a command is supplied, and the launcher always supplies
   one — without `-t` the remote shell is degraded and tmux fails with *"open
   terminal failed: not a terminal"*) and hands ssh a *single shell-quoted

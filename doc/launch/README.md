@@ -7,6 +7,8 @@ status: implemented
 author: model:openai/gpt-6-astra
 date: 2026-10-22
 sources:
+  - resource: opencode://ses_e80ce13ddffeiWXfWVMBW9qXv5
+    title: Integrate shared embedded SSH planning in the local worker, preserve one SSH option set and target shell setup, and verify actual no-target-tta transport with the real proxy
   - resource: opencode://ses_e80e6e9a9ffe2N24sOOfQnrL3D
     title: Migrate embedded tta to the optional runner's shared observation driver and native/process handoff while preserving consumer PTY and retry ownership
   - resource: opencode://ses_e9b53ce88ffeghFZjnj3tsWYCr
@@ -45,7 +47,7 @@ term-preserver --mosh w --tmux compfuzor
 
 | Cargo feature / `--session-backend` value | Implementation |
 |---|---|
-| `tta-lib` | Compose the sibling pure `tta-launcher` with `tta-runner`; no installed local tta executable required |
+| `tta-lib` | Compose pure `tta-launcher` with `tta-runner`; local or SSH planning without an installed tta on the execution host |
 | `tta-cli` | Execute `tta` on the execution host |
 | `classic-tmux-cli` | Exact-name classic tmux, with subprocess discovery |
 | `classic-tmux-tmax` | Exact-name classic tmux, with native `tmax` discovery |
@@ -56,9 +58,10 @@ The separate existing `tmux` feature controls introspection, not launching.
 Its sample types remain available when observation is disabled.
 
 Default features are `regex,tmux,tta-lib,tta-cli,classic-tmux-cli,classic-tmux-tmax`:
-all four launch implementations compile, embedded tta is the first local
-choice, the tta CLI handles remote transports, and classic covers
-create/attach-only flags and remote fallback. Because `tta-lib` and
+all four launch implementations compile, embedded tta is the first local **and
+SSH** choice, the tta CLI remains an explicit SSH option and the existing mosh
+carrier, and classic covers create/attach-only flags and availability fallback.
+Because `tta-lib` and
 `classic-tmux-tmax` resolve sibling path dependencies, default builds need the
 sibling checkouts; a crates.io publish would have to drop both from defaults.
 Slim builds select backend subsets explicitly:
@@ -82,15 +85,17 @@ connections inherit tmax's supported-platform/protocol requirements.
 
 The default `session_backend = "auto"` selects:
 
-1. Local embedded tta, if compiled.
+1. Embedded tta for local or SSH targets, if compiled.
 2. tta CLI, if compiled and the executable is present on the execution host.
 3. Local classic native tmux, if compiled.
 4. Classic tmux CLI, if compiled.
 
-Local executable detection occurs after the launch shell's startup files.
-SSH/mosh perform their executable check remotely, on every attempt. Embedded
-and native launch implementations require a local server; selecting either
-explicitly with a transport reports an error.
+Local executable detection occurs after the launch shell's startup files. The
+embedded SSH path does not check for target tta: it observes target inputs and
+prepares commands locally. Explicit SSH `tta-cli` and mosh retain their existing
+remote executable carrier. Classic native tmux remains local-only. Embedded
+mosh is not yet supported; explicit selection reports an error without making
+the existing auto/CLI mosh path unusable.
 
 Fallback concerns **availability only**. A tta matching, permission, protocol,
 or execution failure never falls through to classic creation. Explicit backend
@@ -155,14 +160,19 @@ Remote launches resolve `TTA_SCAFFOLD` on the remote host.
 A generator runs only after an unambiguous clean miss and before creating the
 session. Failure stops the launch; an existing session/project never runs the
 generator. Missing or ambiguous generator configuration is reported rather than
-guessed. `tta-lib` includes the `rekon` adapter; the selected CLI must include
-the corresponding adapter too. The current adapter calls the user's external
-`rekon` script, whose own project-location behavior still applies. See
+guessed. `tta-lib` includes both `rekon` and `rekon-native`; the selected CLI must
+include the corresponding adapter too. `rekon` calls the user's external script,
+whose own project-location behavior still applies. `rekon-native` plans the
+configured Git/jj files/remotes/package directly, including target author/license
+and Git defaults. See
 [tta scaffolding](file:///home/rektide/src/tta/README.md#scaffolding-missing-projects).
 
-The embedded tta adapter also honors `TTA_BACKEND=native|cli` and
-`TTA_TMUX_CONFIG`; the subprocess inherits these tta variables. The explicit
-term-preserver executable and local socket settings own endpoint selection.
+The **local** embedded adapter honors `TTA_BACKEND=native|cli`; SSH uses target
+tmux CLI observations and a terminal handoff, not local native execution.
+`TTA_TMUX_CONFIG` and registry/default inputs belong to the execution host.
+Configured term-preserver `tmux_program` (including its default `tmux`) is an
+explicit executable choice; `session_root`, scaffold and socket overrides win
+when supplied. Remote relative paths remain target-local.
 
 Configuration uses the existing CLI > environment > TOML > defaults layering:
 
@@ -195,16 +205,43 @@ rather than being reimplemented in this consumer. The CLI path executes tta.
 Neither replaces the parent proxy. Retrying starts a new worker, repeating
 discovery against current sessions rather than caching a resolved session ID.
 
-This is the **local runner checkpoint**. Remote transports still use the existing
-remote CLI carrier; no runner-free SSH integration or no-target-tta remote
-guarantee is implemented yet. A future remote prepared handoff must preserve the
-same selected shell setup for probes and actions, and leave this consumer in
-charge of the attempt, PTY, proxy and retry lifecycle.
+For **embedded SSH**, the worker stays local. It passes `--shell`, login and
+interactive policy to `TargetSetup`; when no shell was selected it uses target
+SHELL, not local SHELL. The same setup applies to every bounded, read-only non-PTY
+probe and the final SSH PTY action. Target cwd/HOME/UID/root/config/registry/Git
+facts supply defaults, with explicit consumer settings winning. A fresh remote
+terminal attaches and cannot inherit authority to switch a local tmux client.
+No target tta is needed, including cold creation. The worker hands the prepared
+command to SSH; the parent retains its proxy, PTY and retry prompt.
+
+The parent's `ssh_control_options()` result is serialized once into the attempt
+request and shared unchanged by probes and handoff, along with the same OpenSSH
+config. No silently different connection/master policy is introduced. Startup
+noise, command diagnostics/status, malformed or truncated replies and capture
+incompleteness remain distinct. Read failure stops before mutation; a failed
+scaffold/create prevents handoff. Grouped create → attach → `keep-last` remains
+one tmux queue. After action start, transport loss may leave target mutation
+uncertain: no library fallback/replay/rollback/prune occurs. A **user-authorized**
+retry starts a new worker and fresh discovery, not the previous mutation block.
+
+The worker-free target profile uses POSIX sh/Unix utilities and GNU find; it adds
+no Python/Perl/tta worker requirement. See the
+[tta SSH guide](file:///home/rektide/src/tta/README.md#ssh-targets) for the precise
+profile and UTF-8 boundaries, the
+[actual SSH toolkit](file:///home/rektide/src/tta/verification/ssh/README.md) for
+reusable no-target-tta evidence, and the
+[library-side consumer account](file:///home/rektide/src/tta/doc/consumer/term-preserver.md).
+
+**Mosh remains on its existing remote CLI carrier.** It is not an exec/probe API.
+Embedded planning needs an explicitly selected SSH observation channel (host,
+options/master policy, and matching target setup) before a mosh handoff. That
+integration choice is deferred, not silently approximated by mosh probes.
 
 Native `tmax` owns server queries; the ordinary tmux client owns interactive
 terminal attachment and cold-server startup. Native classic discovery chooses
 the grouped-session target; shared observation uses native queries when that
-backend is selected. Remote transports wrap a remote CLI launch instead.
+backend is selected. Explicit CLI remote backends and mosh retain their carriers;
+embedded SSH uses the prepared handoff described above.
 
 The local sampler uses the launch socket and client executable. Client PID is
 the strongest correlation. tta fragments are never treated as exact fallback
