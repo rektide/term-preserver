@@ -7,6 +7,8 @@ status: implemented
 author: model:openai/gpt-6-astra
 date: 2026-10-22
 sources:
+  - resource: opencode://ses_e804f36ddffepWs5FSeXN6VDBv
+    title: Preserve failed SSH worker evidence through the shared runner writer and expose validated local probe policy with tested configuration precedence
   - resource: opencode://ses_e80ce13ddffeiWXfWVMBW9qXv5
     title: Integrate shared embedded SSH planning in the local worker, preserve one SSH option set and target shell setup, and verify actual no-target-tta transport with the real proxy
   - resource: opencode://ses_e80e6e9a9ffe2N24sOOfQnrL3D
@@ -116,6 +118,8 @@ classic fallback. `--tmux-create` and `--tmux-attach` retain classic-only semant
 | `--dir <path>` | Initial directory; session-launch paths are literal, relative to the execution host's invocation directory |
 | `--no-tmux-group` | Attach to the shared existing session instead of creating a grouped satellite |
 | `--no-ssh-master` | Disable the managed ssh ControlMaster (`ssh_master`, default on; hosts whose effective ssh config already muxes are tagged along on) |
+| `--ssh-probe-timeout MS` | Embedded SSH per-probe local deadline, positive integer milliseconds; default 10000 |
+| `--ssh-probe-retention BYTES` | Embedded SSH retained bytes per channel stream, positive integer; default 262144 |
 | `-- <argv...>` | Initial command for a newly created session only |
 
 The embedded and subprocess tta adapters use the same target, grouping, directory
@@ -186,6 +190,8 @@ tmux_socket = "/run/user/1000/work.sock"
 tmux_group = true
 ssh_master = true
 ssh_master_persist = "10m"
+ssh_probe_timeout = 10000      # milliseconds per embedded SSH probe
+ssh_probe_retention = 262144   # retained bytes per channel stream
 
 [tmux]
 sources = ["poll"]
@@ -217,11 +223,23 @@ Bounded probe capture has closed stdin and an owned process group: keys/agent or
 an already authenticated master must supply authentication. A separate interactive
 password/passphrase bootstrap is not implemented or tested by this slice.
 
+`ssh_probe_timeout` and `ssh_probe_retention` follow CLI >
+`TERM_PRESERVER_LAUNCH__SSH_PROBE_TIMEOUT` /
+`TERM_PRESERVER_LAUNCH__SSH_PROBE_RETENTION` > `[launch]` TOML > defaults. Zero,
+negative and noninteger values are rejected. These are **local embedded SSH
+acquisition** settings (including connection and shell startup for each probe),
+not remote `TTA_*` defaults, action deadlines, or knobs for the legacy remote
+`tta-cli`/mosh carriers. They survive the serialized local worker request.
+
 The parent's `ssh_control_options()` result is serialized once into the attempt
 request and shared unchanged by probes and handoff, along with the same OpenSSH
 config. No silently different connection/master policy is introduced. Startup
 noise, command diagnostics/status, malformed or truncated replies and capture
-incompleteness remain distinct. Read failure stops before mutation; a failed
+incompleteness remain distinct. The shared `tta_runner::ssh::write_diagnostics`
+writer reports startup/trailing/transport/operation evidence on stderr, including
+prior successful probes and failed capture status/EOF/omissions/cleanup, before
+propagating the original prepare failure. Stdout stays clean.
+Read failure stops before mutation; a failed
 scaffold/create prevents handoff. Grouped create → attach → `keep-last` remains
 one tmux queue. After action start, transport loss may leave target mutation
 uncertain: no library fallback/replay/rollback/prune occurs. A **user-authorized**

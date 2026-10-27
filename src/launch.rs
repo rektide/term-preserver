@@ -1,5 +1,6 @@
 // pattern: Functional Core
 
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 
 use crate::launcher::SessionBackend;
@@ -125,6 +126,12 @@ pub struct LaunchConfig {
     /// string (for example `10m`, `1h`, `yes`). Default `10m`.
     #[serde(default)]
     pub ssh_master_persist: Option<String>,
+    /// Embedded SSH per-probe local capture deadline in milliseconds.
+    #[serde(default = "default_ssh_probe_timeout")]
+    pub ssh_probe_timeout: NonZeroU64,
+    /// Embedded SSH retained bytes per encoded channel stream (not decoded stderr).
+    #[serde(default = "default_ssh_probe_retention")]
+    pub ssh_probe_retention: NonZeroUsize,
     #[serde(default = "default_launch_login")]
     pub login: bool,
     #[serde(default = "default_launch_interactive")]
@@ -151,6 +158,8 @@ impl Default for LaunchConfig {
             tmux_group: default_launch_tmux_group(),
             ssh_master: default_launch_ssh_master(),
             ssh_master_persist: None,
+            ssh_probe_timeout: default_ssh_probe_timeout(),
+            ssh_probe_retention: default_ssh_probe_retention(),
             login: default_launch_login(),
             interactive: default_launch_interactive(),
         }
@@ -170,6 +179,14 @@ fn default_launch_tmux_group() -> bool {
 
 fn default_launch_ssh_master() -> bool {
     true
+}
+
+fn default_ssh_probe_timeout() -> NonZeroU64 {
+    NonZeroU64::new(10_000).unwrap()
+}
+
+fn default_ssh_probe_retention() -> NonZeroUsize {
+    NonZeroUsize::new(256 * 1024).unwrap()
 }
 
 /// Effective ssh configuration for a host, from `ssh -G` — config resolution
@@ -221,7 +238,11 @@ pub(crate) fn ssh_control_options(launch: &LaunchConfig) -> Vec<String> {
     let base = std::env::var_os("XDG_RUNTIME_DIR")
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").filter(|s| !s.is_empty()).map(|home| PathBuf::from(home).join(".cache")))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|s| !s.is_empty())
+                .map(|home| PathBuf::from(home).join(".cache"))
+        })
         .unwrap_or_else(|| PathBuf::from(format!("/tmp/term-preserver-{}", nix::unistd::geteuid().as_raw())));
     let directory = base.join("term-preserver").join("ssh");
     use std::os::unix::fs::DirBuilderExt;

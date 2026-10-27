@@ -3,6 +3,7 @@
 // Imperative shell: load_config merges external sources.
 
 use std::env;
+use std::num::{NonZeroU64, NonZeroUsize};
 
 use bon::Builder;
 use clap::Parser;
@@ -156,11 +157,22 @@ pub struct CliArgs {
     )]
     pub no_tmux_group: bool,
 
+    #[arg(long, help = "Disable the managed ssh ControlMaster for ssh transports (default: on)")]
+    pub no_ssh_master: bool,
+
     #[arg(
         long,
-        help = "Disable the managed ssh ControlMaster for ssh transports (default: on)"
+        value_name = "MS",
+        help = "Embedded SSH per-probe capture deadline in positive integer milliseconds (default: 10000)"
     )]
-    pub no_ssh_master: bool,
+    pub ssh_probe_timeout: Option<NonZeroU64>,
+
+    #[arg(
+        long,
+        value_name = "BYTES",
+        help = "Embedded SSH retained bytes per channel stream, positive integer (default: 262144)"
+    )]
+    pub ssh_probe_retention: Option<NonZeroUsize>,
 
     #[arg(long, help = "Working directory for innermost layer")]
     pub dir: Option<String>,
@@ -226,6 +238,10 @@ struct LaunchOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     ssh_master_persist: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    ssh_probe_timeout: Option<NonZeroU64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ssh_probe_retention: Option<NonZeroUsize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     login: Option<bool>,
@@ -261,6 +277,8 @@ impl From<CliArgs> for CliOverlay {
             tmux_group: if args.no_tmux_group { Some(false) } else { None },
             ssh_master: if args.no_ssh_master { Some(false) } else { None },
             ssh_master_persist: None,
+            ssh_probe_timeout: args.ssh_probe_timeout,
+            ssh_probe_retention: args.ssh_probe_retention,
             dir: args.dir,
             login: if args.no_login { Some(false) } else { None },
             interactive: if args.no_interactive { Some(false) } else { None },
@@ -484,6 +502,50 @@ command = ["/bin/from-file"]
         let config = load_config(cli).unwrap();
         assert!(!config.launch.ssh_master);
         assert_eq!(config.launch.ssh_master_persist.as_deref(), Some("1h"));
+    }
+
+    #[test]
+    #[serial]
+    fn ssh_probe_limits_layer_cli_env_file_defaults_and_reject_zero() {
+        use std::io::Write;
+        let names = ["TERM_PRESERVER_LAUNCH__SSH_PROBE_TIMEOUT", "TERM_PRESERVER_LAUNCH__SSH_PROBE_RETENTION"];
+        let saved = names.map(|name| env::var_os(name));
+        for name in names {
+            env::remove_var(name);
+        }
+        let load = |args: &[&str]| load_config(make_cli(args)).unwrap().launch;
+        let defaults = load(&["--config", "/dev/null"]);
+        assert_eq!(defaults.ssh_probe_timeout.get(), 10_000);
+        assert_eq!(defaults.ssh_probe_retention.get(), 262_144);
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"[launch]\nssh_probe_timeout = 100\nssh_probe_retention = 128\n").unwrap();
+        let path = file.path().to_str().unwrap();
+        let from_file = load(&["--config", path]);
+        assert_eq!((from_file.ssh_probe_timeout.get(), from_file.ssh_probe_retention.get()), (100, 128));
+        env::set_var(names[0], "200");
+        env::set_var(names[1], "256");
+        let from_env = load(&["--config", path]);
+        assert_eq!((from_env.ssh_probe_timeout.get(), from_env.ssh_probe_retention.get()), (200, 256));
+        let from_cli = load(&["--config", path, "--ssh-probe-timeout", "300", "--ssh-probe-retention", "512"]);
+        assert_eq!((from_cli.ssh_probe_timeout.get(), from_cli.ssh_probe_retention.get()), (300, 512));
+        for name in names {
+            env::set_var(name, "0");
+            assert!(load_config(make_cli(&["--config", path])).is_err());
+            env::set_var(name, "200");
+        }
+        for (name, value) in names.into_iter().zip(saved) {
+            match value {
+                Some(value) => env::set_var(name, value),
+                None => env::remove_var(name),
+            }
+        }
+        for flag in ["--ssh-probe-timeout", "--ssh-probe-retention"] {
+            assert!(CliArgs::try_parse_from(["tper", flag, "0"]).is_err());
+            assert!(CliArgs::try_parse_from(["tper", flag, "-1"]).is_err());
+        }
+        for field in ["ssh_probe_timeout", "ssh_probe_retention"] {
+            assert!(serde_json::from_value::<LaunchConfig>(serde_json::json!({field: 0})).is_err());
+        }
     }
 
     #[test]

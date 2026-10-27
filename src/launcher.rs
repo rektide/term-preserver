@@ -408,7 +408,12 @@ fn embedded_ssh(launch: &LaunchConfig, trailing: &[String], ssh_options: Vec<Str
         .startup(trailing.iter().map(Into::into).collect())
         .maybe_directory(launch.dir.as_ref().map(Into::into))
         .build();
-    let prepared = match tta_runner::ssh::prepare(ssh, setup, options, tta_runner::capture::Limits::default()) {
+    let limits = tta_runner::capture::Limits {
+        timeout: std::time::Duration::from_millis(launch.ssh_probe_timeout.get()),
+        per_stream: launch.ssh_probe_retention.get(),
+        ..Default::default()
+    };
+    let prepared = match tta_runner::ssh::prepare(ssh, setup, options, limits) {
         Ok(prepared) => prepared,
         Err(error) => {
             if let Err(write_error) = tta_runner::ssh::write_diagnostics(std::io::stderr().lock(), &error.observations) {
