@@ -1,6 +1,6 @@
 // pattern: Functional Core
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::launcher::SessionBackend;
 use crate::session::CommandSpec;
@@ -114,6 +114,17 @@ pub struct LaunchConfig {
     /// shell-only launches ignore it.
     #[serde(default = "default_launch_tmux_group")]
     pub tmux_group: bool,
+    /// When true (default), ssh transports run under a managed OpenSSH
+    /// ControlMaster: connection sharing, fast redials on retry, and one
+    /// standing channel future socket-forwarding work can ride. The control
+    /// directory and options are derived automatically; `--no-ssh-master`
+    /// opts out. mosh has no master equivalent.
+    #[serde(default = "default_launch_ssh_master")]
+    pub ssh_master: bool,
+    /// ControlPersist lifetime for the managed master, as an ssh duration
+    /// string (for example `10m`, `1h`, `yes`). Default `10m`.
+    #[serde(default)]
+    pub ssh_master_persist: Option<String>,
     #[serde(default = "default_launch_login")]
     pub login: bool,
     #[serde(default = "default_launch_interactive")]
@@ -138,6 +149,8 @@ impl Default for LaunchConfig {
             tmux_attach: None,
             dir: None,
             tmux_group: default_launch_tmux_group(),
+            ssh_master: default_launch_ssh_master(),
+            ssh_master_persist: None,
             login: default_launch_login(),
             interactive: default_launch_interactive(),
         }
@@ -153,6 +166,48 @@ fn default_tta_program() -> String {
 
 fn default_launch_tmux_group() -> bool {
     true
+}
+
+fn default_launch_ssh_master() -> bool {
+    true
+}
+
+/// Options for the managed ssh ControlMaster, or an empty vec when disabled
+/// (or not applicable). The control directory is created here, 0700, because
+/// `prepare` may not run again on retry: the directory must exist before the
+/// first ssh client tries to bind the control socket. `%C` hashes the
+/// local host, remote host, port, and user into one path component, keeping
+/// ControlPath short and collision-free per destination.
+pub(crate) fn ssh_control_options(launch: &LaunchConfig) -> Vec<String> {
+    if !launch.ssh_master {
+        return Vec::new();
+    }
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").filter(|s| !s.is_empty()).map(|home| PathBuf::from(home).join(".cache")))
+        .unwrap_or_else(|| PathBuf::from(format!("/tmp/term-preserver-{}", nix::unistd::geteuid().as_raw())));
+    let directory = base.join("term-preserver").join("ssh");
+    use std::os::unix::fs::DirBuilderExt;
+    match std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&directory) {
+        Ok(()) => {}
+        // An unwritable cache must not break launching: ssh treats a failed
+        // control bind as non-fatal under ControlMaster=auto and proceeds
+        // unmultiplexed.
+        Err(error) => {
+            eprintln!("term-preserver: cannot create ssh control directory {}: {error}", directory.display());
+            return Vec::new();
+        }
+    }
+    let persist = launch.ssh_master_persist.clone().unwrap_or_else(|| "10m".into());
+    vec![
+        "-o".into(),
+        "ControlMaster=auto".into(),
+        "-o".into(),
+        format!("ControlPath={}", directory.join("%C").display()),
+        "-o".into(),
+        format!("ControlPersist={persist}"),
+    ]
 }
 
 fn default_launch_login() -> bool {
@@ -315,7 +370,9 @@ pub(crate) fn shell_join(args: &[String]) -> String {
     args.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ")
 }
 
-pub(crate) fn wrap_transport(cmd: Vec<String>, ssh: Option<&str>, mosh: Option<&str>) -> Vec<String> {
+/// `master` carries the managed ControlMaster options (see
+/// [`ssh_control_options`]); empty means an unmultiplexed connection.
+pub(crate) fn wrap_transport(cmd: Vec<String>, ssh: Option<&str>, mosh: Option<&str>, master: &[String]) -> Vec<String> {
     if let Some(host) = ssh {
         // `-t` forces remote PTY allocation: ssh disables the remote tty whenever
         // a command is given (we always give one), and without it an interactive
@@ -328,7 +385,11 @@ pub(crate) fn wrap_transport(cmd: Vec<String>, ssh: Option<&str>, mosh: Option<&
         // command and breaks it -- so it is omitted here. mosh differs on both
         // counts (it passes argv through and uses `--`), so its branch is left
         // alone.
-        vec!["ssh".into(), "-t".into(), host.into(), shell_join(&cmd)]
+        let mut wrapped = vec!["ssh".into(), "-t".into()];
+        wrapped.extend(master.iter().cloned());
+        wrapped.push(host.into());
+        wrapped.push(shell_join(&cmd));
+        wrapped
     } else if let Some(host) = mosh {
         let mut wrapped = vec!["mosh".into(), host.into(), "--".into()];
         wrapped.extend(cmd);
@@ -428,7 +489,7 @@ impl LaunchConfig {
         let shell = resolve_shell(self, env_shell);
         let inner = (!trailing.is_empty()).then(|| trailing.join(" "));
         let shell_cmd = build_shell_invocation(&shell, inner.as_deref(), self.dir.as_deref(), self.login, self.interactive);
-        let full_cmd = wrap_transport(shell_cmd, self.ssh.as_deref(), self.mosh.as_deref());
+        let full_cmd = wrap_transport(shell_cmd, self.ssh.as_deref(), self.mosh.as_deref(), &ssh_control_options(self));
 
         CommandSpec::try_from(full_cmd)
     }
@@ -679,8 +740,62 @@ mod tests {
 
     #[test]
     fn wrap_ssh() {
-        let cmd = wrap_transport(vec!["zsh".into(), "-li".into()], Some("w"), None);
+        let cmd = wrap_transport(vec!["zsh".into(), "-li".into()], Some("w"), None, &[]);
         assert_eq!(cmd, vec!["ssh", "-t", "w", "zsh -li"]);
+    }
+
+    #[test]
+    fn wrap_ssh_splices_master_options_after_t() {
+        let master = vec![
+            "-o".to_string(),
+            "ControlMaster=auto".to_string(),
+            "-o".to_string(),
+            "ControlPath=/run/user/1000/term-preserver/ssh/%C".to_string(),
+            "-o".to_string(),
+            "ControlPersist=10m".to_string(),
+        ];
+        let cmd = wrap_transport(vec!["zsh".into(), "-li".into()], Some("w"), None, &master);
+        assert_eq!(cmd[0], "ssh");
+        assert_eq!(cmd[1], "-t");
+        assert_eq!(&cmd[2..8], master.as_slice());
+        assert_eq!(cmd[8], "w");
+        assert_eq!(cmd[9], "zsh -li");
+    }
+
+    #[test]
+    fn ssh_control_options_disabled_is_empty() {
+        let mut l = launch();
+        l.ssh_master = false;
+        assert!(ssh_control_options(&l).is_empty());
+    }
+
+    #[test]
+    fn ssh_control_options_creates_managed_directory_and_options() {
+        let runtime = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("XDG_RUNTIME_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+        let l = launch();
+        let options = ssh_control_options(&l);
+        match previous {
+            Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+            None => std::env::remove_var("XDG_RUNTIME_DIR"),
+        }
+        let control = options
+            .windows(2)
+            .find_map(|w| (w[0] == "-o" && w[1].starts_with("ControlPath=")).then_some(w[1].clone()))
+            .expect("a ControlPath option");
+        assert!(control.starts_with("ControlPath="));
+        let path = control.strip_prefix("ControlPath=").unwrap();
+        assert!(path.ends_with("/term-preserver/ssh/%C"), "{path}");
+        let directory = std::path::Path::new(path).parent().unwrap();
+        assert!(directory.starts_with(runtime.path()));
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(directory).unwrap().permissions().mode() & 0o777, 0o700);
+        assert!(options.contains(&"ControlMaster=auto".to_string()));
+        assert!(options.contains(&"ControlPersist=10m".to_string()));
+        let mut with_persist = l;
+        with_persist.ssh_master_persist = Some("1h".into());
+        assert!(ssh_control_options(&with_persist).contains(&"ControlPersist=1h".to_string()));
     }
 
     #[test]
@@ -706,13 +821,13 @@ mod tests {
 
     #[test]
     fn wrap_mosh() {
-        let cmd = wrap_transport(vec!["zsh".into(), "-li".into()], None, Some("w"));
+        let cmd = wrap_transport(vec!["zsh".into(), "-li".into()], None, Some("w"), &[]);
         assert_eq!(cmd, vec!["mosh", "w", "--", "zsh", "-li"]);
     }
 
     #[test]
     fn wrap_neither() {
-        let cmd = wrap_transport(vec!["zsh".into()], None, None);
+        let cmd = wrap_transport(vec!["zsh".into()], None, None, &[]);
         assert_eq!(cmd, vec!["zsh"]);
     }
 
@@ -833,6 +948,9 @@ mod tests {
     fn resolve_ssh_without_tmux() {
         let mut l = launch_with_shell("zsh");
         l.ssh = Some("w".into());
+        // The exact-argv shape is asserted with the managed master off; the
+        // default-on splice is covered by wrap_ssh_splices_master_options.
+        l.ssh_master = false;
         let spec = l.resolve(&[], None).unwrap();
         assert_eq!(spec.program, "ssh");
         assert_eq!(spec.args, vec!["-t", "w", "zsh -li"]);

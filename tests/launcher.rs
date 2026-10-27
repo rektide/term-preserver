@@ -145,7 +145,12 @@ fn auto_local_resolution_matches_compiled_backends() {
     let mut l = launch();
     l.tmux = Some("dev".into());
     let selected = select_backend(&l, true);
-    if cfg!(any(feature = "tta-lib", feature = "tta-cli", feature = "classic-tmux-cli", feature = "classic-tmux-tmax")) {
+    if cfg!(any(
+        feature = "tta-lib",
+        feature = "tta-cli",
+        feature = "classic-tmux-cli",
+        feature = "classic-tmux-tmax"
+    )) {
         let selected = selected.unwrap();
         let expected = if cfg!(feature = "tta-lib") {
             SessionBackend::TtaLib
@@ -231,10 +236,7 @@ fn explicit_positive_scaffold_refuses_classic_but_off_allows_it() {
     create.tmux_create = Some("dev".into());
     create.scaffold = Some("rk".into());
     let error = select_backend(&create, true).expect_err("positive scaffold needs a tta target");
-    assert!(
-        format!("{error:#}").contains("requires a tta create-or-match target"),
-        "{error:#}"
-    );
+    assert!(format!("{error:#}").contains("requires a tta create-or-match target"), "{error:#}");
 
     let mut classic = launch();
     classic.tmux = Some("dev".into());
@@ -246,10 +248,7 @@ fn explicit_positive_scaffold_refuses_classic_but_off_allows_it() {
     // The whole off vocabulary opts back into classic semantics.
     for off in ["false", "0", "off", "none"] {
         classic.scaffold = Some(off.into());
-        assert!(
-            select_backend(&classic, true).is_ok(),
-            "--scaffold={off} must still allow classic"
-        );
+        assert!(select_backend(&classic, true).is_ok(), "--scaffold={off} must still allow classic");
     }
 }
 
@@ -288,7 +287,7 @@ fn scaffold_choices_travel_verbatim_into_worker_requests_and_tta_argv() {
     for choice in ["rk", "false"] {
         l.scaffold = Some(choice.into());
         let spec = prepare(&l, &[], None).unwrap();
-        let line = &spec.args[2];
+        let line = spec.args.last().unwrap();
         assert!(line.contains(&format!("--scaffold={choice}")), "{line}");
         assert!(!line.contains("TTA_SCAFFOLD"), "explicit choice needs no env indirection: {line}");
     }
@@ -307,7 +306,7 @@ fn remote_tta_cli_carrier_supplies_the_default_from_the_execution_environment() 
     let spec = prepare(&l, &[], None).unwrap();
     // An unset choice resolves on the remote host, independently of this CLI's
     // scaffold-by-default compile posture.
-    let line = &spec.args[2];
+    let line = spec.args.last().unwrap();
     assert!(line.contains("--scaffold=\"${TTA_SCAFFOLD:-default}\""), "{line}");
 }
 
@@ -319,9 +318,7 @@ fn remote_auto_builds_presence_conditional_with_fallback() {
     l.tmux = Some("dev".into());
     l.ssh = Some("host".into());
     l.tmux_socket = Some("/remote/sock".into());
-    if any_compiled_backend().is_none()
-        || !cfg!(any(feature = "tta-cli", feature = "classic-tmux-cli"))
-    {
+    if any_compiled_backend().is_none() || !cfg!(any(feature = "tta-cli", feature = "classic-tmux-cli")) {
         // Remote auto needs a remote-capable backend; none is compiled.
         assert!(prepare(&l, &trailing(&["tail", "-f"]), None).is_err());
         return;
@@ -329,8 +326,10 @@ fn remote_auto_builds_presence_conditional_with_fallback() {
     let spec = prepare(&l, &trailing(&["tail", "-f"]), None).unwrap();
     assert_eq!(spec.program, "ssh");
     assert_eq!(spec.args[0], "-t");
-    assert_eq!(spec.args[1], "host");
-    let line = spec.args[2].clone();
+    // The host is the element just before the trailing remote script, whether
+    // or not managed master options were spliced in.
+    assert_eq!(spec.args[spec.args.len() - 2], "host");
+    let line = spec.args.last().unwrap().clone();
     if cfg!(feature = "tta-cli") && !cfg!(feature = "classic-tmux-cli") {
         // No classic fallback compiled: tta probe with a loud 127 fallback.
         assert!(line.contains("command -v tta"), "{line}");
@@ -357,7 +356,9 @@ fn remote_explicit_tta_cli_skips_the_presence_probe() {
     l.tmux_socket = Some("/remote/sock".into());
     l.session_backend = SessionBackend::TtaCli;
     let spec = prepare(&l, &trailing(&["vim"]), None).unwrap();
-    let line = spec.args[2].clone();
+    // The remote script is the final argv element: managed master options
+    // (when enabled) sit between -t and the host.
+    let line = spec.args.last().unwrap().clone();
     assert!(!line.contains("command -v"), "explicit backend trusts presence: {line}");
     assert!(line.contains("--socket-path /remote/sock"), "{line}");
     assert!(line.contains("vim"), "{line}");
@@ -397,7 +398,7 @@ fn remote_socket_paths_stay_remote() {
     l.session_backend = backend;
     l.tmux_socket = Some("rel/sock".into());
     let spec = prepare(&l, &[], None).unwrap();
-    let line = spec.args[2].clone();
+    let line = spec.args.last().unwrap().clone();
     assert!(line.contains("rel/sock"), "{line}");
     let cwd = std::env::current_dir().unwrap();
     assert!(!line.contains(cwd.to_str().unwrap()), "remote socket must not be localized: {line}");
@@ -410,7 +411,7 @@ fn remote_classic_only_targets_skip_the_tta_probe() {
     l.tmux_attach = Some("dev".into());
     l.ssh = Some("host".into());
     let spec = prepare(&l, &[], None).unwrap();
-    let line = spec.args[2].clone();
+    let line = spec.args.last().unwrap().clone();
     assert!(!line.contains("command -v"), "{line}");
     assert!(line.contains("attach-session"), "{line}");
 }
@@ -419,7 +420,10 @@ fn remote_classic_only_targets_skip_the_tta_probe() {
 
 #[test]
 fn local_prepare_carries_an_absolute_socket_in_the_worker_request() {
-    let Some(backend) = any_compiled_backend() else { eprintln!("skipping: no backend compiled"); return };
+    let Some(backend) = any_compiled_backend() else {
+        eprintln!("skipping: no backend compiled");
+        return;
+    };
     let mut l = launch();
     l.tmux = Some("dev".into());
     l.session_backend = backend;
@@ -459,7 +463,10 @@ fn default_startup_flags_are_login_and_interactive() {
 
 #[test]
 fn fish_family_avoids_posix_quote_escapes() {
-    let Some(backend) = any_compiled_backend() else { eprintln!("skipping: no backend compiled"); return };
+    let Some(backend) = any_compiled_backend() else {
+        eprintln!("skipping: no backend compiled");
+        return;
+    };
     let mut l = launch();
     l.shell = Some("/usr/bin/fish".into());
     l.tmux = Some("dev".into());
@@ -476,7 +483,10 @@ fn fish_family_avoids_posix_quote_escapes() {
 
 #[test]
 fn nushell_uses_json_external_invocation_without_login_flags() {
-    let Some(backend) = any_compiled_backend() else { eprintln!("skipping: no backend compiled"); return };
+    let Some(backend) = any_compiled_backend() else {
+        eprintln!("skipping: no backend compiled");
+        return;
+    };
     let mut l = launch();
     l.shell = Some("nu".into()); // login/interactive stay default-true
     l.tmux = Some("dev".into());
@@ -583,10 +593,7 @@ impl Server {
             eprintln!("skipping launcher e2e: {TMUX} unavailable");
             return None;
         }
-        let dir = tempfile::Builder::new()
-            .prefix("tp-launcher-")
-            .tempdir_in("/tmp/opencode")
-            .unwrap();
+        let dir = tempfile::Builder::new().prefix("tp-launcher-").tempdir_in("/tmp/opencode").unwrap();
         let socket = dir.path().join("sock");
         assert!(socket.is_absolute());
         let socket = socket.to_str().unwrap().to_owned();
@@ -594,8 +601,7 @@ impl Server {
         let stderr = String::from_utf8_lossy(&probe.stderr);
         assert!(!probe.status.success(), "unexpected server at {socket}");
         assert!(
-            stderr.contains(&socket)
-                && (stderr.contains("no server running") || stderr.contains("No such file or directory")),
+            stderr.contains(&socket) && (stderr.contains("no server running") || stderr.contains("No such file or directory")),
             "isolation not proven: {stderr}"
         );
         // Satellites run a default-shell window when no startup command is
@@ -612,36 +618,18 @@ impl Server {
             tta_registry,
             _dir: dir,
         };
-        server.run_ok(&[
-            "-f",
-            config.to_str().unwrap(),
-            "new-session",
-            "-d",
-            "-s",
-            "tp-seed",
-            "sleep",
-            "60",
-        ]);
+        server.run_ok(&["-f", config.to_str().unwrap(), "new-session", "-d", "-s", "tp-seed", "sleep", "60"]);
         assert_eq!(server.sessions(), vec!["tp-seed".to_string()]);
         Some(server)
     }
 
     fn tmux(&self, args: &[&str]) -> std::process::Output {
-        Command::new(TMUX)
-            .args(["-S", &self.socket])
-            .args(args)
-            .env_remove("TMUX")
-            .output()
-            .unwrap()
+        Command::new(TMUX).args(["-S", &self.socket]).args(args).env_remove("TMUX").output().unwrap()
     }
 
     fn run_ok(&self, args: &[&str]) {
         let output = self.tmux(args);
-        assert!(
-            output.status.success(),
-            "tmux {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert!(output.status.success(), "tmux {args:?}: {}", String::from_utf8_lossy(&output.stderr));
     }
 
     fn sessions(&self) -> Vec<String> {
@@ -753,12 +741,7 @@ fn spawn_proxy(server: &Server, extra: &[impl AsRef<str>], trailing: &[&str]) ->
 
 /// Spawn the proxy with baseline isolation plus one test-specific adjustment
 /// (a scaffold registry, a restricted PATH, an env choice).
-fn spawn_proxy_isolated(
-    server: &Server,
-    extra: &[impl AsRef<str>],
-    trailing: &[impl AsRef<str>],
-    isolate: impl FnOnce(&mut Command),
-) -> Child {
+fn spawn_proxy_isolated(server: &Server, extra: &[impl AsRef<str>], trailing: &[impl AsRef<str>], isolate: impl FnOnce(&mut Command)) -> Child {
     let mut command = Command::new(env!("CARGO_BIN_EXE_term-preserver"));
     command
         .args(["--config", "/dev/null", "--tmux-socket", &server.socket, "--tmux-program", TMUX])
@@ -896,8 +879,7 @@ fn classic_rerun_of_same_launch_reprobes_and_joins_group() {
                 return false;
             };
             let primary_group = &primary.1;
-            !primary_group.is_empty()
-                && groups.iter().any(|(n, g)| n != "lp-grp" && g == primary_group)
+            !primary_group.is_empty() && groups.iter().any(|(n, g)| n != "lp-grp" && g == primary_group)
         });
         let groups = server.groups();
         let primary_group = groups.iter().find(|(n, _)| n == "lp-grp").map(|(_, g)| g.clone()).unwrap_or_default();
@@ -942,8 +924,7 @@ fn classic_no_group_plain_attach_creates_no_satellite() {
         // Wait for the real attach before inspecting: a wrong grouped branch
         // parks the client on a satellite session instead, so only a client
         // sitting directly on lp-plain proves the plain-attach path ran.
-        let attached =
-            wait_until(Duration::from_secs(5), || server.attached_sessions().contains(&"lp-plain".to_owned()));
+        let attached = wait_until(Duration::from_secs(5), || server.attached_sessions().contains(&"lp-plain".to_owned()));
         let count = server.sessions().len(); // seed + attached session; a satellite would make three
         let destroy = server.option("lp-plain", "destroy-unattached");
         server.kill_all();
@@ -1082,11 +1063,7 @@ impl Scaffold {
     }
 
     fn invocations(&self) -> Vec<String> {
-        std::fs::read_to_string(&self.log)
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_owned)
-            .collect()
+        std::fs::read_to_string(&self.log).unwrap_or_default().lines().map(str::to_owned).collect()
     }
 }
 
@@ -1266,7 +1243,10 @@ fn explicit_positive_scaffold_refuses_classic_while_false_launches_classic() {
     extra.extend(["scaf-classic".to_string(), "--scaffold=false".to_string()]);
     let child = spawn_proxy(&server, &extra, &["echo", "scaf-off-classic-marker"]);
     let (out, err, _code) = drain(child);
-    assert!(out.contains("scaf-off-classic-marker"), "classic must launch under scaffold=false: {out:?} {err:?}");
+    assert!(
+        out.contains("scaf-off-classic-marker"),
+        "classic must launch under scaffold=false: {out:?} {err:?}"
+    );
     assert_eq!(server.sessions(), vec!["tp-seed".to_string()], "session dies with its command");
 }
 
@@ -1312,8 +1292,7 @@ fn auto_prefers_embedded_tta_over_classic() {
     // Worker errors print inside the proxy's PTY, so they surface on stdout.
     let combined = format!("{out}{err}");
     assert!(
-        combined.contains("no session or immediate project directory matches")
-            || combined.contains("no generators are configured"),
+        combined.contains("no session or immediate project directory matches") || combined.contains("no generators are configured"),
         "expected tta resolve failure, stdout: {out:?} stderr: {err:?}"
     );
     assert_eq!(server.sessions(), vec!["tp-seed".to_string()]);

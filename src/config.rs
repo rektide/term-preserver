@@ -156,6 +156,12 @@ pub struct CliArgs {
     )]
     pub no_tmux_group: bool,
 
+    #[arg(
+        long,
+        help = "Disable the managed ssh ControlMaster for ssh transports (default: on)"
+    )]
+    pub no_ssh_master: bool,
+
     #[arg(long, help = "Working directory for innermost layer")]
     pub dir: Option<String>,
 
@@ -216,6 +222,10 @@ struct LaunchOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     tmux_group: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    ssh_master: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ssh_master_persist: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     login: Option<bool>,
@@ -249,6 +259,8 @@ impl From<CliArgs> for CliOverlay {
             tmux_create: args.tmux_create,
             tmux_attach: args.tmux_attach,
             tmux_group: if args.no_tmux_group { Some(false) } else { None },
+            ssh_master: if args.no_ssh_master { Some(false) } else { None },
+            ssh_master_persist: None,
             dir: args.dir,
             login: if args.no_login { Some(false) } else { None },
             interactive: if args.no_interactive { Some(false) } else { None },
@@ -447,6 +459,31 @@ command = ["/bin/from-file"]
         let cli = make_cli(&["--config", tmp.path().to_str().unwrap()]);
         let config = load_config(cli).unwrap();
         assert!(!config.launch.tmux_group);
+    }
+
+    #[test]
+    fn cli_launch_ssh_master_defaults_on() {
+        let cli = make_cli(&["--config", "/dev/null"]);
+        let config = load_config(cli).unwrap();
+        assert!(config.launch.ssh_master);
+    }
+
+    #[test]
+    fn cli_no_ssh_master_maps_to_false() {
+        let cli = make_cli(&["--config", "/dev/null", "--no-ssh-master"]);
+        let config = load_config(cli).unwrap();
+        assert!(!config.launch.ssh_master);
+    }
+
+    #[test]
+    fn ssh_master_and_persist_from_toml() {
+        let mut tmp = NamedTempFile::new().unwrap();
+        use std::io::Write;
+        tmp.write_all(b"[launch]\nssh_master = false\nssh_master_persist = \"1h\"\n").unwrap();
+        let cli = make_cli(&["--config", tmp.path().to_str().unwrap()]);
+        let config = load_config(cli).unwrap();
+        assert!(!config.launch.ssh_master);
+        assert_eq!(config.launch.ssh_master_persist.as_deref(), Some("1h"));
     }
 
     #[test]

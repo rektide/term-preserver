@@ -101,6 +101,7 @@ job          (optional)   →  trailing startup argv for a new session
 | `--no-login` | Drop login-shell mode (default: login) |
 | `--no-interactive` | Drop interactive mode (default: interactive) |
 | `--no-tmux-group` | Plain create-or-attach (`tmux new -As`); for tmux < 3.4 or shared view |
+| `--no-ssh-master` | Disable the managed ssh ControlMaster (default: on) |
 
 `--tta` and the three target-selecting `--tmux*` flags are mutually exclusive,
 as are `--ssh`/`--mosh`. A
@@ -179,6 +180,14 @@ Notes:
 - **Retry re-runs the whole stack.** The resolved command carries the full
   transport + shell + tmux chain, so the [retry prompt](#retry-prompt)
   reconnects and re-attaches with one keystroke.
+- **ssh runs under a managed ControlMaster.** `--ssh` transports default to
+  `ControlMaster=auto` with a per-destination control socket under
+  `$XDG_RUNTIME_DIR/term-preserver/ssh/` and `ControlPersist=10m`: redials on
+  retry reuse the standing connection, and future socket-forwarding work has a
+  channel to ride. The directory and options are derived automatically — no
+  `~/.ssh/config` needed. `--no-ssh-master` (or `[launch] ssh_master = false`)
+  opts out; `ssh_master_persist` overrides the lifetime. mosh has no master
+  equivalent.
 
 ### What's shell-evaluated vs literal
 

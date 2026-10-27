@@ -44,6 +44,7 @@ _arguments -s -S -C \
   '--reemit-title=[Re-emit captured title on child exit]:enabled:(true false)' \
   '--print-gone-title=[Print "gone <title> (pid N)" on child exit]:enabled:(true false)' \
   '--no-tmux-group[Attach to the existing session instead of joining its group]' \
+'--no-ssh-master[Disable the managed ssh ControlMaster (default on)]' \
   '--no-login[Skip login shell mode]' \
   '--no-interactive[Skip interactive shell mode]' \
   '(-h --help)'{-h,--help}'[Show help]' && ret=0

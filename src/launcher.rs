@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "classic-tmux")]
 use crate::launch::TmuxMode;
-use crate::launch::{shell_join, shell_quote, wrap_transport, LaunchConfig};
+use crate::launch::{shell_join, shell_quote, ssh_control_options, wrap_transport, LaunchConfig};
 use crate::session::CommandSpec;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
@@ -188,7 +188,12 @@ pub fn prepare(launch: &LaunchConfig, trailing: &[String], env_shell: Option<&st
         format!("exec {script}")
     };
     argv.push(if family == "fish" { format!("exec {script}") } else { script });
-    CommandSpec::try_from(wrap_transport(argv, launch.ssh.as_deref(), launch.mosh.as_deref()))
+    CommandSpec::try_from(wrap_transport(
+        argv,
+        launch.ssh.as_deref(),
+        launch.mosh.as_deref(),
+        &ssh_control_options(launch),
+    ))
 }
 
 // Nu double-quoted strings are literal (interpolation requires a leading $).
