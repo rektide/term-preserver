@@ -121,6 +121,46 @@ impl Server {
         };
         endpoints
     }
+
+    /// `pane_current_command` is eventually consistent: right after a window
+    /// spawns it still names the pre-exec pane process ("tmux") until the
+    /// server refreshes it. Cross-backend samples must be compared only once
+    /// every pane reports one of the settled startup commands.
+    fn settle_commands(&self, session: &str, expected: &[&str]) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let output = self
+                .command()
+                .args([
+                    "list-panes",
+                    "-t",
+                    &format!("={session}"),
+                    "-s",
+                    "-F",
+                    "#{pane_current_command}",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "tmux list-panes: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let commands = String::from_utf8_lossy(&output.stdout);
+            if !commands.trim().is_empty()
+                && commands
+                    .lines()
+                    .all(|command| expected.contains(&command))
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "pane commands did not settle to {expected:?}: {commands}"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
 }
 
 impl Drop for Server {
@@ -163,6 +203,7 @@ fn endpoint_queries_exact_session_and_preserves_all_pane_fields() {
         "sleep",
         "300",
     ]);
+    server.settle_commands("sample-long-name", &["sleep"]);
 
     let baseline = sample_at(&server.endpoint, u32::MAX, Some("sample-long-name")).unwrap();
     assert_eq!(baseline.session_name.as_deref(), Some("sample-long-name"));
