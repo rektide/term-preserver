@@ -185,9 +185,12 @@ Notes:
   `$XDG_RUNTIME_DIR/term-preserver/ssh/` and `ControlPersist=10m`: redials on
   retry reuse the standing connection, and future socket-forwarding work has a
   channel to ride. The directory and options are derived automatically — no
-  `~/.ssh/config` needed. `--no-ssh-master` (or `[launch] ssh_master = false`)
-  opts out; `ssh_master_persist` overrides the lifetime. mosh has no master
-  equivalent.
+  `~/.ssh/config` needed. A host whose effective ssh configuration already
+  multiplexes (`ssh -G` reports a ControlMaster of yes/auto/ask with a
+  ControlPath) is **tagged along on** instead — your sockets, lifetimes, and
+  prompt choices stand untouched. `--no-ssh-master` (or
+  `[launch] ssh_master = false`) opts out; `ssh_master_persist` overrides the
+  lifetime. mosh has no master equivalent.
 
 ### What's shell-evaluated vs literal
 

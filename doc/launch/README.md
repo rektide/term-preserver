@@ -110,7 +110,7 @@ classic fallback. `--tmux-create` and `--tmux-attach` retain classic-only semant
 | `--tmux-socket <path>` | Socket on the execution host; local paths are frozen to absolute paths |
 | `--dir <path>` | Initial directory; session-launch paths are literal, relative to the execution host's invocation directory |
 | `--no-tmux-group` | Attach to the shared existing session instead of creating a grouped satellite |
-| `--no-ssh-master` | Disable the managed ssh ControlMaster (`ssh_master`, default on) |
+| `--no-ssh-master` | Disable the managed ssh ControlMaster (`ssh_master`, default on; hosts whose effective ssh config already muxes are tagged along on) |
 | `-- <argv...>` | Initial command for a newly created session only |
 
 The embedded and subprocess tta adapters use the same target, grouping, directory

@@ -263,14 +263,23 @@ fn scaffold_choices_travel_verbatim_into_worker_requests_and_tta_argv() {
     } else {
         None
     };
+    if tta_backend.is_none() {
+        // Classic-only builds cannot express a positive scaffold choice;
+        // the "false" half below still exercises the worker request shape.
+        eprintln!("skipping positive scaffold shape: no tta backend compiled");
+    }
     for choice in ["rk", "false"] {
         let mut l = launch();
         l.tmux = Some("dev".into());
-        l.session_backend = if choice == "false" {
+        let backend = if choice == "false" {
             any_compiled_backend().expect("some backend compiled for shape tests")
         } else {
-            tta_backend.expect("a tta backend must be compiled for scaffold shape tests")
+            match tta_backend {
+                Some(backend) => backend,
+                None => continue,
+            }
         };
+        l.session_backend = backend;
         l.scaffold = Some(choice.into());
         let spec = prepare(&l, &[], None).unwrap();
         let script = spec.args.last().unwrap();
@@ -942,6 +951,11 @@ fn classic_no_group_plain_attach_creates_no_satellite() {
 // --- end-to-end: tta backends share one surface ----------------------------
 
 fn tta_available() -> bool {
+    if !cfg!(feature = "tta-cli") {
+        // The host binary may exist while this build cannot execute it.
+        eprintln!("skipping tta e2e: tta-cli not compiled");
+        return false;
+    }
     if Path::new(TTA).exists() {
         true
     } else {

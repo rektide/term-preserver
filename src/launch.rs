@@ -172,14 +172,50 @@ fn default_launch_ssh_master() -> bool {
     true
 }
 
+/// Effective ssh configuration for a host, from `ssh -G` — config resolution
+/// only, no connection and no prompt. Keys are lowercased; an unset
+/// `controlpath` is absent from the output rather than printed as `none`.
+fn ssh_effective_config(program: &str, host: &str) -> Option<Vec<(String, String)>> {
+    let output = std::process::Command::new(program).arg("-G").arg(host).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    Some(
+        text.lines()
+            .filter_map(|line| line.split_once(' ').map(|(k, v)| (k.to_ascii_lowercase(), v.trim().to_string())))
+            .collect(),
+    )
+}
+
+/// True when the effective ssh configuration already multiplexes this host: a
+/// ControlMaster (yes/auto/ask) together with a ControlPath to bind. Such a
+/// host is left exactly as configured — no second socket, and `ask` keeps its
+/// prompt semantics instead of being silently coerced to `auto`.
+pub(crate) fn ssh_user_mux_present(program: &str, host: &str) -> bool {
+    let Some(config) = ssh_effective_config(program, host) else {
+        return false;
+    };
+    let value = |key: &str| config.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+    let master = value("controlmaster").unwrap_or_default();
+    let path = value("controlpath").unwrap_or_default();
+    !path.is_empty() && path != "none" && matches!(master, "true" | "yes" | "auto" | "ask")
+}
+
 /// Options for the managed ssh ControlMaster, or an empty vec when disabled
-/// (or not applicable). The control directory is created here, 0700, because
-/// `prepare` may not run again on retry: the directory must exist before the
-/// first ssh client tries to bind the control socket. `%C` hashes the
-/// local host, remote host, port, and user into one path component, keeping
-/// ControlPath short and collision-free per destination.
+/// (or not applicable). A host whose effective ssh configuration already
+/// multiplexes (see [`ssh_user_mux_present`]) is tagged along on instead:
+/// the user's own sockets, lifetimes, and prompt choices stand. The control
+/// directory is created here, 0700, because `prepare` may not run again on
+/// retry: the directory must exist before the first ssh client tries to bind
+/// the control socket. `%C` hashes the local host, remote host, port, and
+/// user into one path component, keeping ControlPath short and
+/// collision-free per destination.
 pub(crate) fn ssh_control_options(launch: &LaunchConfig) -> Vec<String> {
-    if !launch.ssh_master {
+    let Some(host) = launch.ssh.as_deref() else {
+        return Vec::new();
+    };
+    if !launch.ssh_master || ssh_user_mux_present("ssh", host) {
         return Vec::new();
     }
     let base = std::env::var_os("XDG_RUNTIME_DIR")
@@ -766,16 +802,104 @@ mod tests {
     fn ssh_control_options_disabled_is_empty() {
         let mut l = launch();
         l.ssh_master = false;
+        l.ssh = Some("w".into());
         assert!(ssh_control_options(&l).is_empty());
     }
 
     #[test]
-    fn ssh_control_options_creates_managed_directory_and_options() {
+    fn ssh_control_options_skips_when_no_ssh_transport() {
+        // mosh-only and local launches must not probe ssh or create the
+        // managed control directory.
+        let l = launch();
+        assert!(ssh_control_options(&l).is_empty());
+        let mut mosh = launch();
+        mosh.mosh = Some("w".into());
+        assert!(ssh_control_options(&mosh).is_empty());
+    }
+
+    fn stub_ssh(dir: &std::path::Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("ssh");
+        std::fs::write(&path, format!("#!/bin/sh\nprintf '%s' '{}'\n", body)).unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+    }
+
+    fn with_stubbed_path<F: FnOnce()>(stub: &std::path::Path, f: F) {
+        let previous = std::env::var_os("PATH");
+        let mut path = stub.as_os_str().to_owned();
+        path.push(":");
+        path.push(previous.as_deref().unwrap_or_default());
+        std::env::set_var("PATH", path);
+        f();
+        match previous {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+    }
+
+    #[test]
+    fn ssh_user_mux_detected_from_effective_config() {
+        let stub = tempfile::tempdir().unwrap();
+        stub_ssh(
+            stub.path(),
+            "hostname w\ncontrolmaster auto\ncontrolpath /home/me/.cache/cm/6a3f\ncontrolpersist 900\n",
+        );
+        with_stubbed_path(stub.path(), || assert!(ssh_user_mux_present("ssh", "w")));
+    }
+
+    #[test]
+    fn ssh_user_mux_absent_without_path_or_master() {
+        // Defaults: controlmaster false and no controlpath line at all.
+        let stub = tempfile::tempdir().unwrap();
+        stub_ssh(stub.path(), "hostname w\ncontrolmaster false\ncontrolpersist no\n");
+        with_stubbed_path(stub.path(), || assert!(!ssh_user_mux_present("ssh", "w")));
+        // A master without a bindable path is not a functioning mux either.
+        stub_ssh(stub.path(), "hostname w\ncontrolmaster auto\ncontrolpath none\n");
+        with_stubbed_path(stub.path(), || assert!(!ssh_user_mux_present("ssh", "w")));
+    }
+
+    #[test]
+    fn ssh_control_options_tags_along_on_user_mux() {
+        let stub = tempfile::tempdir().unwrap();
+        stub_ssh(stub.path(), "hostname w\ncontrolmaster yes\ncontrolpath /home/me/cm/%C\n");
         let runtime = tempfile::tempdir().unwrap();
+        let previous_path = std::env::var_os("PATH");
+        let mut path = stub.path().as_os_str().to_owned();
+        path.push(":");
+        path.push(previous_path.as_deref().unwrap_or_default());
+        std::env::set_var("PATH", path);
+        let previous_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+        let mut l = launch();
+        l.ssh = Some("w".into());
+        let options = ssh_control_options(&l);
+        std::env::set_var("PATH", previous_path.unwrap_or_default());
+        match previous_runtime {
+            Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+            None => std::env::remove_var("XDG_RUNTIME_DIR"),
+        }
+        assert!(options.is_empty(), "user mux must be tagged along on, not overridden: {options:?}");
+        assert!(!runtime.path().join("term-preserver").exists(), "no managed directory when tagging along");
+    }
+
+    #[test]
+    fn ssh_control_options_creates_managed_directory_and_options() {
+        let stub = tempfile::tempdir().unwrap();
+        stub_ssh(stub.path(), "hostname w\ncontrolmaster false\ncontrolpersist no\n");
+        let runtime = tempfile::tempdir().unwrap();
+        let previous_path = std::env::var_os("PATH");
+        let mut path = stub.path().as_os_str().to_owned();
+        path.push(":");
+        path.push(previous_path.as_deref().unwrap_or_default());
+        std::env::set_var("PATH", path);
         let previous = std::env::var_os("XDG_RUNTIME_DIR");
         std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
-        let l = launch();
+        let mut l = launch();
+        l.ssh = Some("w".into());
         let options = ssh_control_options(&l);
+        std::env::set_var("PATH", previous_path.unwrap_or_default());
         match previous {
             Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
             None => std::env::remove_var("XDG_RUNTIME_DIR"),
