@@ -41,6 +41,10 @@ impl SessionBackend {
 struct Request {
     launch: LaunchConfig,
     trailing: Vec<String>,
+    /// Computed once by the parent. The local attempt worker uses this same
+    /// connection/session policy for every non-PTY probe and final PTY handoff.
+    #[serde(default)]
+    ssh_options: Option<Vec<String>>,
 }
 
 /// Freeze the local socket for discovery, handoff, and observation alike.
@@ -113,7 +117,7 @@ pub fn select_backend(launch: &LaunchConfig, tta_present: bool) -> eyre::Result<
     }
     let remote = launch.ssh.is_some() || launch.mosh.is_some();
     if !classic_only {
-        if cfg!(feature = "tta-lib") && !remote {
+        if cfg!(feature = "tta-lib") && (!remote || launch.ssh.is_some()) {
             return Ok(SessionBackend::TtaLib);
         }
         if cfg!(feature = "tta-cli") && tta_present {
@@ -139,25 +143,21 @@ pub fn prepare(launch: &LaunchConfig, trailing: &[String], env_shell: Option<&st
     }
     // Validate feature/operation compatibility here; executable presence is
     // resolved later, in the child's login environment or on the remote host.
-    select_backend(launch, true)?;
+    let backend = select_backend(launch, true)?;
+    // Embedded SSH planning must run in a LOCAL attempt worker. Sending the
+    // worker (or installed target tta) through the remote carrier would recreate
+    // the dependency this path is meant to remove. Shell startup happens later
+    // on the target, identically for probes and the prepared action.
+    if launch.ssh.is_some() && backend == SessionBackend::TtaLib {
+        return CommandSpec::try_from(worker_argv(launch.clone(), trailing, Some(ssh_control_options(launch)))?);
+    }
     let remote = launch.ssh.is_some() || launch.mosh.is_some();
     let command = if remote {
         remote_command(launch, trailing)?
     } else {
         let mut local = launch.clone();
         normalize_local(&mut local)?;
-        let request = serde_json::to_string(&Request {
-            launch: local,
-            trailing: trailing.to_vec(),
-        })?;
-        vec![
-            std::env::current_exe()?
-                .into_os_string()
-                .into_string()
-                .map_err(|_| eyre::eyre!("executable path must be UTF-8"))?,
-            "--launch-worker".into(),
-            request,
-        ]
+        worker_argv(local, trailing, None)?
     };
     // The command-language carrier is always POSIX sh. The outer selected shell
     // performs login/environment setup, then hands it literal argv (also in nu).
@@ -194,6 +194,21 @@ pub fn prepare(launch: &LaunchConfig, trailing: &[String], env_shell: Option<&st
         launch.mosh.as_deref(),
         &ssh_control_options(launch),
     ))
+}
+
+fn worker_argv(launch: LaunchConfig, trailing: &[String], ssh_options: Option<Vec<String>>) -> eyre::Result<Vec<String>> {
+    Ok(vec![
+        std::env::current_exe()?
+            .into_os_string()
+            .into_string()
+            .map_err(|_| eyre::eyre!("executable path must be UTF-8"))?,
+        "--launch-worker".into(),
+        serde_json::to_string(&Request {
+            launch,
+            trailing: trailing.to_vec(),
+            ssh_options,
+        })?,
+    ])
 }
 
 // Nu double-quoted strings are literal (interpolation requires a leading $).
@@ -339,9 +354,20 @@ pub(crate) fn executable_present(program: &str) -> bool {
 
 /// Entry point used only by the PTY child; no parent terminal is replaced.
 pub fn execute_worker(json: &str) -> eyre::Result<()> {
-    let Request { mut launch, trailing } = serde_json::from_str(json)?;
+    let Request {
+        mut launch,
+        trailing,
+        ssh_options,
+    } = serde_json::from_str(json)?;
     launch.validate()?;
     let backend = select_backend(&launch, executable_present(&launch.tta_program))?;
+    #[cfg(feature = "tta-lib")]
+    if launch.ssh.is_some() && backend == SessionBackend::TtaLib {
+        let options = ssh_options.unwrap_or_else(|| ssh_control_options(&launch));
+        return embedded_ssh(&launch, &trailing, options);
+    }
+    #[cfg(not(feature = "tta-lib"))]
+    let _ = ssh_options;
     if matches!(backend, SessionBackend::TtaLib | SessionBackend::TtaCli) {
         launch.scaffold = Some(scaffold_choice(&launch)?);
     }
@@ -356,6 +382,51 @@ pub fn execute_worker(json: &str) -> eyre::Result<()> {
         SessionBackend::ClassicTmuxCli | SessionBackend::ClassicTmuxTmax => classic_local(&launch, &trailing, backend),
         _ => Err(eyre::eyre!("session backend {backend:?} was not compiled")),
     }
+}
+
+#[cfg(feature = "tta-lib")]
+fn embedded_ssh(launch: &LaunchConfig, trailing: &[String], ssh_options: Vec<String>) -> eyre::Result<()> {
+    use tta_launcher::{socket, target};
+    use tta_runner::command::Execute;
+    let ssh = tta_runner::ssh::Ssh::builder()
+        .destination(launch.ssh.clone().expect("SSH worker"))
+        .options(ssh_options.into_iter().map(Into::into).collect())
+        .build();
+    let setup = target::TargetSetup::builder()
+        .maybe_shell(launch.shell.clone())
+        .login(launch.login)
+        .interactive(launch.interactive)
+        .build();
+    let options = target::Options::builder()
+        .argument(launch.tmux_mode().expect("session target").session().into())
+        .maybe_root(launch.session_root.as_ref().map(Into::into))
+        .maybe_socket(launch.tmux_socket.as_ref().map(|path| socket::Selection::Path(path.into())))
+        .program(launch.tmux_program.clone().into())
+        .maybe_scaffold(launch.scaffold.clone())
+        .default_scaffold("default".into())
+        .grouped(launch.tmux_group)
+        .startup(trailing.iter().map(Into::into).collect())
+        .maybe_directory(launch.dir.as_ref().map(Into::into))
+        .build();
+    let prepared = tta_runner::ssh::prepare(ssh, setup, options, tta_runner::capture::Limits::default())?;
+    // Keep probe diagnostics off the framed stdout and visible in the PTY log.
+    use std::io::Write;
+    for record in &prepared.observations {
+        if let Ok(decoded) = &record.decoded {
+            for bytes in [
+                &decoded.diagnostics.startup_stdout,
+                &decoded.diagnostics.trailing_stdout,
+                &decoded.diagnostics.transport_stderr,
+                &decoded.diagnostics.command_stderr,
+            ] {
+                std::io::stderr().write_all(bytes)?;
+            }
+        }
+    }
+    // No backend fallback after this boundary. A transport failure may follow
+    // mutation; proxy/retry policy is still owned by term-preserver.
+    let status = tta_command::Expression::from(prepared.command()?).execute(tta_command::Handoff::Exec)?;
+    std::process::exit(status.map(crate::session::exit_code_from_status).unwrap_or(0));
 }
 
 // Explicit -S freezes endpoint identity but unlike -L does not create tmux's
@@ -604,7 +675,7 @@ mod tests {
     }
 
     #[test]
-    fn availability_orders_tta_before_classic_and_never_uses_remote_libraries() {
+    fn availability_prefers_embedded_ssh_but_keeps_mosh_on_existing_carriers() {
         let launch = target();
         let expected = if cfg!(feature = "tta-lib") {
             Some(SessionBackend::TtaLib)
@@ -622,7 +693,9 @@ mod tests {
             ssh: Some("w".into()),
             ..launch
         };
-        let expected = if cfg!(feature = "tta-cli") {
+        let expected = if cfg!(feature = "tta-lib") {
+            Some(SessionBackend::TtaLib)
+        } else if cfg!(feature = "tta-cli") {
             Some(SessionBackend::TtaCli)
         } else if cfg!(feature = "classic-tmux-cli") {
             Some(SessionBackend::ClassicTmuxCli)
@@ -632,8 +705,44 @@ mod tests {
         assert_eq!(select_backend(&remote, true).ok(), expected);
         assert_eq!(
             select_backend(&remote, false).ok(),
-            cfg!(feature = "classic-tmux-cli").then_some(SessionBackend::ClassicTmuxCli)
+            if cfg!(feature = "tta-lib") {
+                Some(SessionBackend::TtaLib)
+            } else {
+                cfg!(feature = "classic-tmux-cli").then_some(SessionBackend::ClassicTmuxCli)
+            }
         );
+        let mosh = LaunchConfig {
+            ssh: None,
+            mosh: Some("w".into()),
+            ..remote
+        };
+        let expected = if cfg!(feature = "tta-cli") {
+            Some(SessionBackend::TtaCli)
+        } else {
+            cfg!(feature = "classic-tmux-cli").then_some(SessionBackend::ClassicTmuxCli)
+        };
+        assert_eq!(select_backend(&mosh, true).ok(), expected);
+    }
+
+    #[cfg(feature = "tta-lib")]
+    #[test]
+    fn embedded_ssh_worker_carries_one_option_set_and_target_shell_without_local_setup() {
+        let launch = LaunchConfig {
+            ssh: Some("host".into()),
+            shell: Some("/target/shell".into()),
+            session_root: Some("relative-target-root".into()),
+            tmux_socket: Some("relative-target-socket".into()),
+            ssh_master: false,
+            ..target()
+        };
+        let spec = prepare(&launch, &["literal ' $;".into()], Some("/local/wrong-shell")).unwrap();
+        assert_eq!(spec.args[0], "--launch-worker");
+        let request: Request = serde_json::from_str(&spec.args[1]).unwrap();
+        assert_eq!(request.ssh_options, Some(Vec::new()));
+        assert_eq!(request.launch.shell.as_deref(), Some("/target/shell"));
+        assert_eq!(request.launch.session_root.as_deref(), Some("relative-target-root"));
+        assert_eq!(request.launch.tmux_socket.as_deref(), Some("relative-target-socket"));
+        assert_eq!(request.trailing, ["literal ' $;"]);
     }
 
     #[test]

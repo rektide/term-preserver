@@ -189,11 +189,16 @@ fn auto_ignores_tta_cli_presence_without_the_program() {
 }
 
 #[test]
-fn auto_remote_never_selects_local_only_backends() {
+fn auto_ssh_prefers_embedded_planning_without_a_target_executable() {
     let mut l = launch();
     l.tmux = Some("dev".into());
     l.ssh = Some("host".into());
     let selected = select_backend(&l, true);
+    if cfg!(feature = "tta-lib") {
+        assert_eq!(selected.unwrap(), SessionBackend::TtaLib);
+        assert_eq!(select_backend(&l, false).unwrap(), SessionBackend::TtaLib);
+        return;
+    }
     if !cfg!(any(feature = "classic-tmux-cli", feature = "tta-cli")) {
         // Remote cannot use embedded backends; without a remote-capable CLI
         // backend auto fails loudly.
@@ -322,11 +327,21 @@ fn remote_tta_cli_carrier_supplies_the_default_from_the_execution_environment() 
 // --- remote argv shapes (constructed, never executed) ---------------------
 
 #[test]
-fn remote_auto_builds_presence_conditional_with_fallback() {
+fn remote_auto_builds_local_embedded_worker_or_legacy_availability_carrier() {
     let mut l = launch();
     l.tmux = Some("dev".into());
     l.ssh = Some("host".into());
     l.tmux_socket = Some("/remote/sock".into());
+    if cfg!(feature = "tta-lib") {
+        l.ssh_master = false;
+        let spec = prepare(&l, &trailing(&["tail", "-f"]), None).unwrap();
+        assert_eq!(spec.args[0], "--launch-worker");
+        let request: serde_json::Value = serde_json::from_str(&spec.args[1]).unwrap();
+        assert_eq!(request["launch"]["ssh"], "host");
+        assert_eq!(request["launch"]["tmux_socket"], "/remote/sock");
+        assert_eq!(request["ssh_options"], serde_json::json!([]));
+        return;
+    }
     if any_compiled_backend().is_none() || !cfg!(any(feature = "tta-cli", feature = "classic-tmux-cli")) {
         // Remote auto needs a remote-capable backend; none is compiled.
         assert!(prepare(&l, &trailing(&["tail", "-f"]), None).is_err());
@@ -374,11 +389,14 @@ fn remote_explicit_tta_cli_skips_the_presence_probe() {
 }
 
 #[test]
-fn remote_embedded_backends_are_rejected() {
+fn embedded_ssh_is_local_worker_but_mosh_and_classic_native_stay_unsupported() {
     let mut lib = launch();
     lib.tmux = Some("dev".into());
     lib.ssh = Some("host".into());
     lib.session_backend = SessionBackend::TtaLib;
+    assert_eq!(prepare(&lib, &[], None).is_ok(), cfg!(feature = "tta-lib"));
+    lib.ssh = None;
+    lib.mosh = Some("host".into());
     assert!(prepare(&lib, &[], None).is_err());
 
     let mut tmax = launch();
