@@ -7,6 +7,8 @@ status: implemented
 author: model:openai/gpt-6-astra
 date: 2026-10-22
 sources:
+  - resource: opencode://ses_e80e6e9a9ffe2N24sOOfQnrL3D
+    title: Migrate embedded tta to the optional runner's shared observation driver and native/process handoff while preserving consumer PTY and retry ownership
   - resource: opencode://ses_e9b53ce88ffeghFZjnj3tsWYCr
     title: Commission and implement embedded/subprocess tta, optional classic CLI/native tmux, shared grouping and scaffold policy, and isolated verification
   - resource: opencode://ses_e9a9a3c0cffeZZGrwYvVEDokp0
@@ -43,7 +45,7 @@ term-preserver --mosh w --tmux compfuzor
 
 | Cargo feature / `--session-backend` value | Implementation |
 |---|---|
-| `tta-lib` | Embed the sibling `tta-launcher`; no installed tta executable required |
+| `tta-lib` | Compose the sibling pure `tta-launcher` with `tta-runner`; no installed local tta executable required |
 | `tta-cli` | Execute `tta` on the execution host |
 | `classic-tmux-cli` | Exact-name classic tmux, with subprocess discovery |
 | `classic-tmux-tmax` | Exact-name classic tmux, with native `tmax` discovery |
@@ -73,7 +75,8 @@ cargo build --no-default-features --features regex,tmux,classic-tmux-tmax
 ```
 
 These development manifests reference `../tta/session/launcher`,
-`../tta/shell/command`, and `../tmux-interface-control` (the `tmax` package).
+`../tta/session/runner`, `../tta/shell/command`, and `../tmux-interface-control`
+(the `tmax` package).
 Keep the sibling checkouts available for Cargo dependency resolution. Native
 connections inherit tmax's supported-platform/protocol requirements.
 
@@ -183,9 +186,17 @@ default command/shell to run. A bare term-preserver still runs `$SHELL`.
 
 Local launching runs a small worker inside the child PTY, after shell setup.
 It resolves the target and replaces itself with the interactive tmux client.
-The embedded tta path calls the library directly; the CLI path executes tta.
+The embedded tta path calls `tta_runner::prepare()` and executes its prepared
+plan; shared workflow policy supplies satellite names from a fresh inventory
+rather than being reimplemented in this consumer. The CLI path executes tta.
 Neither replaces the parent proxy. Retrying starts a new worker, repeating
 discovery against current sessions rather than caching a resolved session ID.
+
+This is the **local runner checkpoint**. Remote transports still use the existing
+remote CLI carrier; no runner-free SSH integration or no-target-tta remote
+guarantee is implemented yet. A future remote prepared handoff must preserve the
+same selected shell setup for probes and actions, and leave this consumer in
+charge of the attempt, PTY, proxy and retry lifecycle.
 
 Native `tmax` owns server queries; the ordinary tmux client owns interactive
 terminal attachment and cold-server startup. Native classic discovery chooses

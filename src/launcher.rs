@@ -380,30 +380,31 @@ fn exec_argv(argv: Vec<String>) -> eyre::Result<()> {
 
 #[cfg(feature = "tta-lib")]
 fn embedded_tta(launch: &LaunchConfig, trailing: &[String]) -> eyre::Result<()> {
-    use tta_launcher::{backend, socket};
-    let context = socket::Context::from_environment()?;
+    use tta_runner::execution::{ExecuteLaunch, LaunchBackend};
+    use tta_runner::{backend, socket};
+    let context = socket::context()?;
     let socket = context.resolve(&socket::Selection::Path(launch.tmux_socket.as_ref().unwrap().into()))?;
-    let mode = context.client_mode(&socket.path)?;
-    let lookup: Box<dyn backend::SessionLookup> = match std::env::var("TTA_BACKEND").as_deref() {
-        Ok("cli") => Box::new(backend::Cli {
-            program: launch.tmux_program.clone().into(),
-            socket: socket.path.clone(),
-        }),
-        Err(std::env::VarError::NotPresent) | Ok("") | Ok("native") => Box::new(backend::Native {
-            endpoint: tmax::endpoint::Tmux::new().socket_path(&socket.path),
-        }),
+    let mode = socket::client_mode(&context, &socket.path)?;
+    let (lookup, execution): (Box<dyn backend::SessionLookup>, LaunchBackend) = match std::env::var("TTA_BACKEND").as_deref() {
+        Ok("cli") => (
+            Box::new(backend::Cli {
+                program: launch.tmux_program.clone().into(),
+                socket: socket.path.clone(),
+            }),
+            LaunchBackend::Cli,
+        ),
+        Err(std::env::VarError::NotPresent) | Ok("") | Ok("native") => (
+            Box::new(backend::Native {
+                endpoint: tmax::endpoint::Tmux::new().socket_path(&socket.path),
+            }),
+            LaunchBackend::Native,
+        ),
         _ => {
             eyre::bail!("TTA_BACKEND must be native or cli");
         }
     };
     let root = project_root(launch);
     let choice = scaffold_choice(launch)?;
-    let resolved = tta_launcher::scaffold::resolve()
-        .lookup(lookup.as_ref())
-        .argument(launch.tmux_mode().as_ref().unwrap().session())
-        .maybe_root(root.as_deref())
-        .choice(&choice)
-        .call()?;
     let startup: Vec<std::ffi::OsString> = trailing.iter().map(Into::into).collect();
     let directory = launch.dir.as_ref().map(|d| context.cwd.join(d));
     let program = if launch.tmux_program.contains('/') {
@@ -412,18 +413,20 @@ fn embedded_tta(launch: &LaunchConfig, trailing: &[String]) -> eyre::Result<()> 
         launch.tmux_program.clone().into()
     };
     let config = std::env::var_os("TTA_TMUX_CONFIG").filter(|s| !s.is_empty()).map(|p| context.cwd.join(p));
-    let expression = tta_launcher::launch()
-        .selection(&resolved.selection)
+    let prepared = tta_runner::prepare()
+        .lookup(lookup.as_ref())
+        .argument(launch.tmux_mode().as_ref().unwrap().session())
+        .maybe_root(root.as_deref())
+        .choice(&choice)
         .socket(&socket)
         .client_mode(mode)
         .program(&program)
         .grouped(launch.tmux_group)
         .startup(&startup)
         .maybe_directory(directory.as_deref())
-        .maybe_config(config.as_deref())
-        .maybe_prefix(resolved.prefix.as_ref())
+        .maybe_tmux_config(config.as_deref())
         .call()?;
-    let status = expression.execute(tta_command::Handoff::Exec)?;
+    let status = prepared.plan.execute(execution, tta_command::Handoff::Exec)?;
     std::process::exit(status.map(crate::session::exit_code_from_status).unwrap_or(0));
 }
 

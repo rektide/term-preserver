@@ -917,6 +917,7 @@ dependencies = [
  "tmax",
  "tta-command",
  "tta-launcher",
+ "tta-runner",
 ]
 
 [[package]]
@@ -947,7 +948,7 @@ dependencies = [
 
 [[package]]
 name = "tmax"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "bytes",
  "nix 0.31.3",
@@ -1050,7 +1051,7 @@ dependencies = [
 
 [[package]]
 name = "tta-command"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "bon",
  "thiserror",
@@ -1058,11 +1059,10 @@ dependencies = [
 
 [[package]]
 name = "tta-launcher"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bon",
- "rustix",
  "serde",
  "thiserror",
  "tmax",
@@ -1073,8 +1073,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tta-runner"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "bon",
+ "rustix",
+ "thiserror",
+ "tmax",
+ "tracing",
+ "tta-command",
+ "tta-launcher",
+]
+
+[[package]]
 name = "tta-scaffold-rekon"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "thiserror",
  "tta-command",

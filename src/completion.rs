@@ -171,7 +171,7 @@ fn session_names(launch: &LaunchConfig) -> eyre::Result<Vec<String>> {
 /// does: `TTA_BACKEND=cli` shells out, anything else native.
 #[cfg(feature = "tta-lib")]
 fn embedded_sessions(launch: &LaunchConfig, socket: &Path) -> eyre::Result<Vec<String>> {
-    use tta_launcher::backend::{self, SessionLookup};
+    use tta_runner::backend::{self, SessionLookup};
     let lookup: Box<dyn SessionLookup> = match std::env::var("TTA_BACKEND").as_deref() {
         Ok("cli") => Box::new(backend::Cli {
             program: launch.tmux_program.clone().into(),
@@ -276,7 +276,7 @@ fn scaffold_names(launch: &LaunchConfig) -> eyre::Result<Vec<String>> {
 
 #[cfg(feature = "tta-lib")]
 fn embedded_scaffold_names() -> eyre::Result<Vec<String>> {
-    let config = tta_launcher::scaffold::Config::load().map_err(tta_launcher::scaffold::Error::from)?;
+    let config = tta_runner::scaffold::load_config().map_err(tta_launcher::scaffold::Error::from)?;
     Ok(config.names())
 }
 
