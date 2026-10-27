@@ -213,6 +213,9 @@ facts supply defaults, with explicit consumer settings winning. A fresh remote
 terminal attaches and cannot inherit authority to switch a local tmux client.
 No target tta is needed, including cold creation. The worker hands the prepared
 command to SSH; the parent retains its proxy, PTY and retry prompt.
+Bounded probe capture has closed stdin and an owned process group: keys/agent or
+an already authenticated master must supply authentication. A separate interactive
+password/passphrase bootstrap is not implemented or tested by this slice.
 
 The parent's `ssh_control_options()` result is serialized once into the attempt
 request and shared unchanged by probes and handoff, along with the same OpenSSH
@@ -224,7 +227,7 @@ one tmux queue. After action start, transport loss may leave target mutation
 uncertain: no library fallback/replay/rollback/prune occurs. A **user-authorized**
 retry starts a new worker and fresh discovery, not the previous mutation block.
 
-The worker-free target profile uses POSIX sh/Unix utilities and GNU find; it adds
+The worker-free target profile uses POSIX sh/Unix utilities and GNU find/stat; it adds
 no Python/Perl/tta worker requirement. See the
 [tta SSH guide](file:///home/rektide/src/tta/README.md#ssh-targets) for the precise
 profile and UTF-8 boundaries, the
