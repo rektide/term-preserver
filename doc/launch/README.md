@@ -230,6 +230,11 @@ negative and noninteger values are rejected. These are **local embedded SSH
 acquisition** settings (including connection and shell startup for each probe),
 not remote `TTA_*` defaults, action deadlines, or knobs for the legacy remote
 `tta-cli`/mosh carriers. They survive the serialized local worker request.
+Retention measures encoded channel bytes: operation stderr uses roughly 3× its
+decoded size as hex in channel stdout, sharing that cap with operation stdout,
+framing and startup/trailing chatter. Roughly 87 KiB of stderr alone can exhaust
+the default 256 KiB cap. Raising it does not raise the probe's independent
+786432-character metadata ceiling; truncation always fails closed.
 
 The parent's `ssh_control_options()` result is serialized once into the attempt
 request and shared unchanged by probes and handoff, along with the same OpenSSH
@@ -252,6 +257,8 @@ profile and UTF-8 boundaries, the
 [actual SSH toolkit](file:///home/rektide/src/tta/verification/ssh/README.md) for
 reusable no-target-tta evidence, and the
 [library-side consumer account](file:///home/rektide/src/tta/doc/consumer/term-preserver.md).
+Fish/Nu selected-shell carrier execution is not certified by the installed-shell
+fixtures; construction coverage must not be read as execution coverage.
 
 **Mosh remains on its existing remote CLI carrier.** It is not an exec/probe API.
 Embedded planning needs an explicitly selected SSH observation channel (host,
