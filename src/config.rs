@@ -509,7 +509,7 @@ command = ["/bin/from-file"]
     fn ssh_probe_limits_layer_cli_env_file_defaults_and_reject_zero() {
         use std::io::Write;
         let names = ["TERM_PRESERVER_LAUNCH__SSH_PROBE_TIMEOUT", "TERM_PRESERVER_LAUNCH__SSH_PROBE_RETENTION"];
-        let saved = names.map(|name| env::var_os(name));
+        let saved = names.map(env::var_os);
         for name in names {
             env::remove_var(name);
         }
