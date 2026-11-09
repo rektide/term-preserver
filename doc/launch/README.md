@@ -7,6 +7,8 @@ status: implemented
 author: model:openai/gpt-6-astra
 date: 2026-10-22
 sources:
+  - resource: opencode://ses_e3e3170d4ffeij7U00lUlwaZg7
+    title: Adopt tta 0.7.0 list-valued APIs without claiming a new multi-root consumer UI; record the receiving checkpoint and scratch-bound test limit
   - resource: opencode://ses_e804f36ddffepWs5FSeXN6VDBv
     title: Preserve failed SSH worker evidence through the shared runner writer and expose validated local probe policy with tested configuration precedence
   - resource: opencode://ses_e80ce13ddffeiWXfWVMBW9qXv5
@@ -30,6 +32,13 @@ sources:
 ---
 
 # Session launch backends
+
+The embedded tta dependency is now 0.7.0. Existing explicit `--session-root`
+values pass as one-element ordered lists; local root configuration/completion
+retains this consumer's existing single-root policy pending the multi-root surface
+integration. SSH without that explicit override uses target-local ordered-root
+defaults. The [library-side consumer account](file:///home/rektide/src/tta/doc/consumer/term-preserver.md)
+records the API adoption, receiving-lock check and current verification limit.
 
 `--tmux <target>` defaults to **tta when available**. tta selects an exact
 session name, otherwise a unique session substring, otherwise a matching project

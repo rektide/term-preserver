@@ -399,7 +399,7 @@ fn embedded_ssh(launch: &LaunchConfig, trailing: &[String], ssh_options: Vec<Str
         .build();
     let options = target::Options::builder()
         .argument(launch.tmux_mode().expect("session target").session().into())
-        .maybe_root(launch.session_root.as_ref().map(Into::into))
+        .maybe_roots(launch.session_root.as_ref().map(|root| vec![root.into()]))
         .maybe_socket(launch.tmux_socket.as_ref().map(|path| socket::Selection::Path(path.into())))
         .program(launch.tmux_program.clone().into())
         .maybe_scaffold(launch.scaffold.clone())
@@ -494,7 +494,7 @@ fn embedded_tta(launch: &LaunchConfig, trailing: &[String]) -> eyre::Result<()> 
     let prepared = tta_runner::prepare()
         .lookup(lookup.as_ref())
         .argument(launch.tmux_mode().as_ref().unwrap().session())
-        .maybe_root(root.as_deref())
+        .roots(&root.into_iter().collect::<Vec<_>>())
         .choice(&choice)
         .socket(&socket)
         .client_mode(mode)
