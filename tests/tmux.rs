@@ -1,7 +1,10 @@
 //! Real-server sampling tests. Every tmux command selects an explicit absolute
-//! socket under /tmp/opencode, verified absent before the first mutation.
+//! socket under an owned fixture scratch root, verified absent before the
+//! first mutation.
 
 #![cfg(feature = "tmux")]
+
+mod common;
 
 use std::io::Write;
 use std::os::unix::fs::{symlink, PermissionsExt};
@@ -33,10 +36,7 @@ impl Server {
             eprintln!("skipping real-server test: {TMUX} unavailable");
             return None;
         }
-        let directory = tempfile::Builder::new()
-            .prefix("tp-sampler-")
-            .tempdir_in("/tmp/opencode")
-            .unwrap();
+        let directory = common::scratch_dir("tp-sampler-");
         let socket = directory.path().join("sock");
         assert!(socket.is_absolute());
         let socket = socket.to_str().unwrap().to_owned();

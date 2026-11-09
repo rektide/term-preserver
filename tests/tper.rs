@@ -2,12 +2,13 @@
 
 #![cfg(feature = "tta-cli")]
 
+mod common;
+
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn tper_hands_its_session_attempt_to_its_own_worker() {
-    std::fs::create_dir_all("/tmp/opencode").unwrap();
-    let dir = tempfile::Builder::new().prefix("tper-worker-").tempdir_in("/tmp/opencode").unwrap();
+    let dir = common::scratch_dir("tper-worker-");
     let client = dir.path().join("tta stub");
     let config = dir.path().join("config.toml");
     let socket = dir.path().join("unused.sock");

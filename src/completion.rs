@@ -11,13 +11,13 @@
 //! silently querying the wrong local server. The compiled backend list stays
 //! available in every context because it never contacts a host.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use clap::ValueEnum;
 
 use crate::launch::LaunchConfig;
-use crate::launcher::{derive_socket, executable_present, project_root, SessionBackend};
+use crate::launcher::{derive_socket, executable_present, SessionBackend};
 
 /// Hidden `--completion-candidates` selection: one query per invocation,
 /// printed one name per line on stdout. Errors go to stderr and leave stdout
@@ -91,34 +91,67 @@ fn backend_names() -> Vec<String> {
         .collect()
 }
 
-/// Sorted immediate project basenames. Directory symlinks count; dangling
-/// symlinks, regular files, deeper descendants, and non-UTF-8 names do not —
-/// the same policy as tta's project inventory.
+/// Identity-aware project inventory across every configured root, mirroring
+/// tta's completion protocol: a bare basename is offered only when exactly one
+/// physical directory of that exact name exists across all roots, and every
+/// ambiguous basename stays reachable through its one-based `@N/name` selector
+/// (qualified forms that duplicate an offered bare name are dropped so widget
+/// menus stay minimal). Directory/symlink policy matches tta's inventory.
 fn project_names(launch: &LaunchConfig) -> eyre::Result<Vec<String>> {
-    let root = project_root(launch).ok_or_else(|| eyre::eyre!("cannot determine project root"))?;
-    let entries = std::fs::read_dir(&root).map_err(|error| eyre::eyre!("cannot inspect project directory {}: {error}", root.display()))?;
-    let mut names = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        let Some(name) = entry.file_name().into_string().ok() else {
-            continue;
-        };
-        let path = entry.path();
-        let kind = entry.file_type()?;
-        let is_directory = if kind.is_symlink() {
-            match std::fs::metadata(&path) {
-                Ok(metadata) => metadata.is_dir(),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-                Err(error) => return Err(eyre::eyre!("cannot inspect project directory {}: {error}", path.display())),
+    let roots = crate::launcher::project_roots(launch)?;
+    if roots.is_empty() {
+        eyre::bail!("cannot determine project roots: pass --session-root or set TTA_ROOTS, TTA_ROOT, PROJECTS_DIR, or HOME");
+    }
+    // (one-based root slot, basename, canonical physical directory)
+    let mut entries: Vec<(usize, String, PathBuf)> = Vec::new();
+    for (index, root) in roots.iter().enumerate() {
+        let reader = std::fs::read_dir(root).map_err(|error| eyre::eyre!("cannot inspect project directory {}: {error}", root.display()))?;
+        for entry in reader {
+            let entry = entry?;
+            let Some(name) = entry.file_name().into_string().ok() else {
+                continue;
+            };
+            let path = entry.path();
+            let kind = entry.file_type()?;
+            let is_directory = if kind.is_symlink() {
+                match std::fs::metadata(&path) {
+                    Ok(metadata) => metadata.is_dir(),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(error) => return Err(eyre::eyre!("cannot inspect project directory {}: {error}", path.display())),
+                }
+            } else {
+                kind.is_dir()
+            };
+            if is_directory {
+                let directory = path
+                    .canonicalize()
+                    .map_err(|error| eyre::eyre!("cannot inspect project directory {}: {error}", path.display()))?;
+                entries.push((index + 1, name, directory));
             }
-        } else {
-            kind.is_dir()
-        };
-        if is_directory {
-            names.push(name);
         }
     }
-    Ok(names)
+    let mut physical: std::collections::BTreeMap<&str, std::collections::BTreeSet<&Path>> = std::collections::BTreeMap::new();
+    for (_, name, directory) in &entries {
+        physical.entry(name.as_str()).or_default().insert(directory.as_path());
+    }
+    let mut candidates: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut bare: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for (slot, name, _) in &entries {
+        candidates.insert(format!("@{slot}/{name}"));
+        if physical[name.as_str()].len() == 1 {
+            bare.insert(name.as_str());
+        }
+    }
+    for name in &bare {
+        candidates.insert((*name).to_owned());
+    }
+    Ok(candidates
+        .into_iter()
+        .filter(|candidate| match candidate.strip_prefix('@').and_then(|selector| selector.split_once('/')) {
+            Some((_, name)) => !bare.contains(name),
+            None => true,
+        })
+        .collect())
 }
 
 /// Completion-shaped availability: the same auto order `select_backend` uses

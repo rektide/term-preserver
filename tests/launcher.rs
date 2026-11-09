@@ -2,9 +2,11 @@
 //! shapes, local quoting, scaffold-on-miss through a fake `rekon` generator,
 //! and end-to-end launches against a real tmux server.
 //!
-//! Every tmux command here uses an explicit absolute socket under /tmp/opencode
-//! whose absence is proven read-only before the first mutation (AGENTS.md
-//! rules): no default server, no `-L`, no TMUX_TMPDIR reliance. Cleanup is
+//! Every tmux command here uses an explicit absolute socket under an owned
+//! fixture scratch root (TTA_TEST_TMPDIR, then /tmp/opencode, then the system
+//! temp directory) whose absence is proven read-only before the first
+//! mutation (AGENTS.md rules): no default server, no `-L`, no TMUX_TMPDIR
+//! reliance. Cleanup is
 //! `kill-session` of sessions on this test's own socket only; the server is
 //! never killed and exits itself via `exit-empty`.
 //!
@@ -20,6 +22,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+mod common;
 
 use serial_test::serial;
 use tempfile::TempDir;
@@ -620,7 +624,7 @@ impl Server {
             eprintln!("skipping launcher e2e: {TMUX} unavailable");
             return None;
         }
-        let dir = tempfile::Builder::new().prefix("tp-launcher-").tempdir_in("/tmp/opencode").unwrap();
+        let dir = common::scratch_dir("tp-launcher-");
         let socket = dir.path().join("sock");
         assert!(socket.is_absolute());
         let socket = socket.to_str().unwrap().to_owned();

@@ -119,7 +119,7 @@ classic fallback. `--tmux-create` and `--tmux-attach` retain classic-only semant
 | Option | Meaning |
 |---|---|
 | `--session-backend <value>` | `auto` or one of the four implementations above |
-| `--session-root <path>` | tta project root; otherwise `TTA_ROOT`, home-relative `PROJECTS_DIR`, then `~/src` |
+| `--session-root <path>` | Explicit tta project root; otherwise `TTA_ROOTS` (JSON array), `TTA_ROOT`, home-relative `PROJECTS_DIR`, then `~/src` — one active layer replaces the whole ordered list |
 | `--scaffold[=choice]` | tta generator: `default`, a configured name, or `false`; otherwise `TTA_SCAFFOLD`, then `default` |
 | `--tta-program <path>` | tta executable; default `tta` |
 | `--tmux-program <path>` | Final tmux client and classic CLI query executable; default `tmux` |

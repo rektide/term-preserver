@@ -481,7 +481,7 @@ fn embedded_tta(launch: &LaunchConfig, trailing: &[String]) -> eyre::Result<()> 
             eyre::bail!("TTA_BACKEND must be native or cli");
         }
     };
-    let root = project_root(launch);
+    let roots = project_roots(launch)?;
     let choice = scaffold_choice(launch)?;
     let startup: Vec<std::ffi::OsString> = trailing.iter().map(Into::into).collect();
     let directory = launch.dir.as_ref().map(|d| context.cwd.join(d));
@@ -494,7 +494,7 @@ fn embedded_tta(launch: &LaunchConfig, trailing: &[String]) -> eyre::Result<()> 
     let prepared = tta_runner::prepare()
         .lookup(lookup.as_ref())
         .argument(launch.tmux_mode().as_ref().unwrap().session())
-        .roots(&root.into_iter().collect::<Vec<_>>())
+        .roots(&roots)
         .choice(&choice)
         .socket(&socket)
         .client_mode(mode)
@@ -508,26 +508,35 @@ fn embedded_tta(launch: &LaunchConfig, trailing: &[String]) -> eyre::Result<()> 
     std::process::exit(status.map(crate::session::exit_code_from_status).unwrap_or(0));
 }
 
-/// Root precedence for tta project matching: `--session-root`, then
-/// `TTA_ROOT`, then home-relative `PROJECTS_DIR`, then `~/src`. Shared with
-/// completion so inventories and launches see the same projects.
-pub(crate) fn project_root(launch: &LaunchConfig) -> Option<PathBuf> {
-    launch
-        .session_root
-        .as_ref()
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("TTA_ROOT").filter(|s| !s.is_empty()).map(PathBuf::from))
-        .or_else(|| {
-            let projects = std::env::var_os("PROJECTS_DIR")
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("src"));
-            if projects.is_absolute() {
-                Some(projects)
-            } else {
-                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(projects))
-            }
-        })
+/// Ordered project roots for tta project matching: `--session-root`, then
+/// `TTA_ROOTS` (a JSON array of nonempty paths), then `TTA_ROOT`, then
+/// home-relative `PROJECTS_DIR`, then `~/src`. One active layer replaces the
+/// whole list, mirroring tta's declared configuration precedence; relative
+/// entries freeze against the invocation cwd. Shared with completion so
+/// inventories and launches see the same projects.
+pub(crate) fn project_roots(launch: &LaunchConfig) -> eyre::Result<Vec<PathBuf>> {
+    let value = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    let cwd = std::env::current_dir()?;
+    let roots = if let Some(root) = &launch.session_root {
+        vec![PathBuf::from(root)]
+    } else if let Some(json) = value("TTA_ROOTS") {
+        let text = json.into_string().map_err(|_| eyre::eyre!("TTA_ROOTS must be a UTF-8 JSON array of paths"))?;
+        let paths: Vec<PathBuf> = serde_json::from_str(&text).map_err(|error| eyre::eyre!("TTA_ROOTS must be a JSON array of nonempty paths: {error}"))?;
+        if paths.is_empty() || paths.iter().any(|path| path.as_os_str().is_empty()) {
+            eyre::bail!("TTA_ROOTS must list at least one nonempty path");
+        }
+        paths
+    } else if let Some(root) = value("TTA_ROOT") {
+        vec![PathBuf::from(root)]
+    } else {
+        let projects = value("PROJECTS_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("src"));
+        if projects.is_absolute() {
+            vec![projects]
+        } else {
+            value("HOME").map(|home| vec![PathBuf::from(home).join(projects)]).unwrap_or_default()
+        }
+    };
+    Ok(roots.into_iter().map(|root| cwd.join(root)).collect())
 }
 
 #[cfg(feature = "classic-tmux")]
@@ -825,6 +834,52 @@ mod tests {
         assert_eq!(&args[start..], &["--", "-project", "printf", "a ; $b"]);
     }
 
+    #[test]
+    #[serial_test::serial]
+    fn project_roots_replace_the_whole_list_layer_by_layer() {
+        use std::ffi::OsString;
+        let saved: Vec<(String, Option<OsString>)> = ["TTA_ROOTS", "TTA_ROOT", "PROJECTS_DIR", "HOME"]
+            .iter()
+            .map(|key| (key.to_string(), std::env::var_os(key)))
+            .collect();
+        let restore = || {
+            for (key, value) in &saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        };
+        let cwd = std::env::current_dir().unwrap();
+        let launch = |root: Option<&str>| LaunchConfig {
+            session_root: root.map(str::to_owned),
+            ..target()
+        };
+        std::env::set_var("TTA_ROOTS", r#"["ignored","/also-ignored"]"#);
+        std::env::set_var("TTA_ROOT", "/ignored-root");
+        std::env::set_var("PROJECTS_DIR", "/ignored-projects");
+        std::env::set_var("HOME", "/home/base");
+        // The explicit session root replaces every environment layer.
+        assert_eq!(project_roots(&launch(Some("explicit"))).unwrap(), vec![cwd.join("explicit")]);
+        // TTA_ROOTS replaces TTA_ROOT and PROJECTS_DIR; relative entries freeze
+        // against the invocation cwd.
+        std::env::set_var("TTA_ROOTS", r#"["personal","/work/team"]"#);
+        assert_eq!(project_roots(&launch(None)).unwrap(), vec![cwd.join("personal"), PathBuf::from("/work/team")]);
+        // An invalid active layer fails instead of falling through.
+        for invalid in ["[]", r#"[""]"#, "not JSON"] {
+            std::env::set_var("TTA_ROOTS", invalid);
+            assert!(project_roots(&launch(None)).is_err(), "{invalid}");
+        }
+        // An empty value is unset; TTA_ROOT replaces PROJECTS_DIR.
+        std::env::set_var("TTA_ROOTS", "");
+        assert_eq!(project_roots(&launch(None)).unwrap(), vec![PathBuf::from("/ignored-root")]);
+        // The HOME-relative PROJECTS_DIR layer remains the default.
+        std::env::remove_var("TTA_ROOT");
+        std::env::remove_var("PROJECTS_DIR");
+        assert_eq!(project_roots(&launch(None)).unwrap(), vec![PathBuf::from("/home/base/src")]);
+        restore();
+    }
+
     #[cfg(feature = "classic-tmux-cli")]
     #[test]
     fn classic_argv_separates_formats_command_delimiters_and_startup_argv() {
@@ -846,8 +901,16 @@ mod tests {
     #[test]
     fn remote_classic_probe_and_group_preserve_shell_and_tmux_metacharacters() {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::create_dir_all("/tmp/opencode").unwrap();
-        let dir = tempfile::Builder::new().prefix("tp-remote-argv-").tempdir_in("/tmp/opencode").unwrap();
+        fn scratch_dir(prefix: &str) -> tempfile::TempDir {
+            if let Some(path) = std::env::var_os("TTA_TEST_TMPDIR").filter(|value| !value.is_empty()) {
+                return tempfile::Builder::new().prefix(prefix).tempdir_in(path).unwrap();
+            }
+            match tempfile::Builder::new().prefix(prefix).tempdir_in("/tmp/opencode") {
+                Ok(dir) => dir,
+                Err(_) => tempfile::Builder::new().prefix(prefix).tempdir_in(std::env::temp_dir()).unwrap(),
+            }
+        }
+        let dir = scratch_dir("tp-remote-argv-");
         let client = dir.path().join("fake tmux");
         let probe = dir.path().join("probe");
         let group = dir.path().join("group");

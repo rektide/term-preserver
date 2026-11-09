@@ -1,9 +1,12 @@
 //! Completion-candidate protocol and Zsh widget tests. Live-server tests use
-//! explicit absolute private sockets under /tmp/opencode, verified absent
-//! before the first mutation, and clean up the narrowest owned target (the
-//! session they created) rather than the whole server.
+//! explicit absolute private sockets under an owned fixture scratch root
+//! (TTA_TEST_TMPDIR, then /tmp/opencode, then the system temp directory),
+//! verified absent before the first mutation, and clean up the narrowest owned
+//! target (the session they created) rather than the whole server.
 
 #![cfg(unix)]
+
+mod common;
 
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -11,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 const TMUX: &str = "/usr/bin/tmux";
 
-/// A private tmux server bound to an explicit absolute socket under
-/// /tmp/opencode. Isolation is proven read-only before anything starts.
+/// A private tmux server bound to an explicit absolute socket below the
+/// fixture scratch root. Isolation is proven read-only before anything starts.
 struct Server {
     /// Kept alive so the private socket directory outlives the server.
     _directory: tempfile::TempDir,
@@ -25,7 +28,7 @@ impl Server {
             eprintln!("skipping live-server completion test: {TMUX} unavailable");
             return None;
         }
-        let directory = tempfile::Builder::new().prefix(tag).tempdir_in("/tmp/opencode").unwrap();
+        let directory = common::scratch_dir(tag);
         let socket = directory.path().join("sock");
         assert!(socket.is_absolute());
         let probe = Command::new(TMUX).args(["-S", socket.to_str().unwrap(), "ls"]).output().unwrap();
@@ -100,7 +103,7 @@ fn projects_fixture(root: &Path) {
 
 #[test]
 fn project_inventory_is_sorted_literal_immediate_and_observation_only() {
-    let temp = tempfile::Builder::new().prefix("tp-completion-").tempdir_in("/tmp/opencode").unwrap();
+    let temp = common::scratch_dir("tp-completion-");
     projects_fixture(&temp.path().join("root"));
     let output = names(
         tper()
@@ -119,7 +122,7 @@ fn project_inventory_is_sorted_literal_immediate_and_observation_only() {
 
 #[test]
 fn completion_root_precedence_matches_launch_configuration() {
-    let temp = tempfile::Builder::new().prefix("tp-completion-").tempdir_in("/tmp/opencode").unwrap();
+    let temp = common::scratch_dir("tp-completion-");
     for root in ["src", "legacy", "env", "cli"] {
         fs::create_dir_all(temp.path().join(root).join(root)).unwrap();
     }
@@ -144,8 +147,35 @@ fn completion_root_precedence_matches_launch_configuration() {
 }
 
 #[test]
+fn project_completion_is_identity_aware_across_tta_roots() {
+    let temp = common::scratch_dir("tp-completion-roots-");
+    fs::create_dir_all(temp.path().join("first/shared")).unwrap();
+    fs::create_dir_all(temp.path().join("first/solo-first")).unwrap();
+    fs::create_dir_all(temp.path().join("second/shared")).unwrap();
+    fs::create_dir_all(temp.path().join("second/solo-second")).unwrap();
+    // The same TTA_ROOTS environment a launch would use drives completion: a
+    // basename duplicated across distinct physical directories is offered only
+    // through qualified selectors; unique names stay bare.
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    let json = format!("[\"{}\",\"{}\"]", first.display(), second.display());
+    assert_eq!(
+        names(tper().env("TTA_ROOTS", &json).args(["--completion-candidates", "projects"])),
+        "@1/shared\n@2/shared\nsolo-first\nsolo-second\n"
+    );
+    // An invalid active layer is an inventory error, never silent fallback.
+    let output = tper()
+        .env("TTA_ROOTS", "not JSON")
+        .args(["--completion-candidates", "projects"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
 fn candidate_errors_leave_stdout_empty_and_backends_match_build_features() {
-    let temp = tempfile::Builder::new().prefix("tp-completion-").tempdir_in("/tmp/opencode").unwrap();
+    let temp = common::scratch_dir("tp-completion-");
     let output = tper()
         .arg("--session-root")
         .arg(temp.path().join("missing"))
@@ -168,7 +198,7 @@ fn candidate_errors_leave_stdout_empty_and_backends_match_build_features() {
 #[cfg(feature = "classic-tmux-cli")]
 #[test]
 fn live_session_inventory_uses_selected_endpoint_without_creating_a_server() {
-    let temp = tempfile::Builder::new().prefix("tp-completion-").tempdir_in("/tmp/opencode").unwrap();
+    let temp = common::scratch_dir("tp-completion-");
     let Some(server) = Server::start("tp-completion-live-") else {
         return;
     };
@@ -211,7 +241,7 @@ fn live_session_inventory_uses_selected_endpoint_without_creating_a_server() {
 #[cfg(any(feature = "tta-lib", feature = "classic-tmux-tmax", feature = "classic-tmux-cli"))]
 #[test]
 fn auto_inventory_falls_back_to_a_compiled_local_backend() {
-    let temp = tempfile::Builder::new().prefix("tp-completion-").tempdir_in("/tmp/opencode").unwrap();
+    let temp = common::scratch_dir("tp-completion-");
     let Some(server) = Server::start("tp-completion-auto-") else {
         return;
     };
@@ -234,7 +264,7 @@ fn auto_inventory_falls_back_to_a_compiled_local_backend() {
 #[cfg(feature = "tta-lib")]
 #[test]
 fn scaffold_inventory_lists_configured_generators_and_fails_loudly() {
-    let temp = tempfile::Builder::new().prefix("tp-completion-").tempdir_in("/tmp/opencode").unwrap();
+    let temp = common::scratch_dir("tp-completion-");
     let config = temp.path().join("config.toml");
     fs::write(
         &config,
@@ -261,7 +291,7 @@ fn scaffold_inventory_lists_configured_generators_and_fails_loudly() {
 #[test]
 fn tta_cli_scaffold_inventory_forwards_to_the_tta_program() {
     use std::os::unix::fs::PermissionsExt;
-    let temp = tempfile::Builder::new().prefix("tp-completion-").tempdir_in("/tmp/opencode").unwrap();
+    let temp = common::scratch_dir("tp-completion-");
     let bin = temp.path().join("bin");
     fs::create_dir_all(&bin).unwrap();
     let shim = bin.join("tta");
@@ -296,7 +326,7 @@ fn tta_cli_scaffold_inventory_forwards_to_the_tta_program() {
 #[test]
 fn scaffold_inventory_honors_explicit_tta_cli_and_configured_program_over_the_registry() {
     use std::os::unix::fs::PermissionsExt;
-    let temp = tempfile::Builder::new().prefix("tp-completion-").tempdir_in("/tmp/opencode").unwrap();
+    let temp = common::scratch_dir("tp-completion-");
     let bin = temp.path().join("bin");
     fs::create_dir_all(&bin).unwrap();
     let shim = bin.join("my-tta");
@@ -334,7 +364,7 @@ fn scaffold_inventory_honors_explicit_tta_cli_and_configured_program_over_the_re
 #[test]
 fn remote_transport_offers_no_host_inventory_and_never_contacts_a_host() {
     use std::os::unix::fs::PermissionsExt;
-    let temp = tempfile::Builder::new().prefix("tp-completion-").tempdir_in("/tmp/opencode").unwrap();
+    let temp = common::scratch_dir("tp-completion-");
     let bin = temp.path().join("bin");
     fs::create_dir_all(&bin).unwrap();
     for name in ["ssh", "mosh", "tmux"] {
@@ -387,7 +417,7 @@ fn zsh_completes_targets_options_and_quoted_names() {
     let Some(server) = Server::start("tp-completion-zsh-") else {
         return;
     };
-    let fixture = tempfile::Builder::new().prefix("tp-completion-zshfix-").tempdir_in("/tmp/opencode").unwrap();
+    let fixture = common::scratch_dir("tp-completion-zshfix-");
     let shell = Path::new(env!("CARGO_MANIFEST_DIR")).join("shell/zsh");
     let output = Command::new("zsh")
         .arg("-f")

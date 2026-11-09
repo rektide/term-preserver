@@ -1,6 +1,8 @@
 //! Local process carrier, NOT SSH evidence. Never contacts a host or tmux.
 #![cfg(feature = "tta-lib")]
 
+mod common;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
@@ -15,7 +17,7 @@ fn executable(path: &Path, source: &str) {
 
 #[test]
 fn failed_prepare_reports_earlier_and_failed_evidence_without_handoff() {
-    let dir = tempfile::Builder::new().prefix("tp-ssh-worker-").tempdir_in("/tmp/opencode").unwrap();
+    let dir = common::scratch_dir("tp-ssh-worker-");
     executable(
         &dir.path().join("ssh"),
         "#!/bin/sh\n[ \"$1\" = -T ] || { touch \"$FIXTURE/mutation\"; exit 92; }\nprintf 'probe\\n' >> \"$FIXTURE/probes\"\nif [ -f \"$FIXTURE/first\" ]; then\n printf 'failed stdout evidence\\n'; printf 'transport failure evidence\\n' >&2; exit 23\nfi\ntouch \"$FIXTURE/first\"\nexec /bin/sh -c \"$3\"\n",
@@ -77,7 +79,7 @@ fn failed_prepare_reports_earlier_and_failed_evidence_without_handoff() {
 #[test]
 fn worker_probe_limits_survive_serialization_and_bound_actual_capture() {
     use std::time::{Duration, Instant};
-    let dir = tempfile::Builder::new().prefix("tp-ssh-limits-").tempdir_in("/tmp/opencode").unwrap();
+    let dir = common::scratch_dir("tp-ssh-limits-");
     executable(&dir.path().join("ssh"), "#!/bin/sh\n[ \"$1\" = -T ] || { touch \"$FIXTURE/mutation\"; exit 92; }\ncase \"$MODE\" in\n slow) sleep 0.15; printf 'malformed reply';;\n flood) head -c 2048 /dev/zero;;\nesac\n");
     for (mode, timeout, retention, expected) in [
         ("slow", 20, 4096, "capture=Deadline"),

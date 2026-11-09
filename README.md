@@ -224,8 +224,11 @@ already on the line — `--config`, `--session-root`, `--session-backend`,
 `--tmux-socket`, `--tmux-program`, `--tta-program`, and the transport
 selectors — so candidates reflect the same merged configuration a launch
 would use (including `TERM_PRESERVER_LAUNCH__*` and
-`TTA_ROOT`/`PROJECTS_DIR`); the option whose value is being completed never
-constrains its own candidates. `--scaffold=` completes the fixed
+`TTA_ROOTS`/`TTA_ROOT`/`PROJECTS_DIR`); the option whose value is being completed never
+constrains its own candidates. Project completion is identity-aware across the
+whole root list: a basename duplicated in distinct physical directories is
+offered only through its one-based `@N/name` selector, so Tab never pretends
+such a name is unique. `--scaffold=` completes the fixed
 `default`/`false` posture vocabulary plus configured generator names.
 Inventories are **local-only**: with `--ssh`/`--mosh` on the line the binary
 answers no host inventory rather than initiating a transport or silently
