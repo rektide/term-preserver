@@ -386,49 +386,86 @@ pub fn execute_worker(json: &str) -> eyre::Result<()> {
 
 #[cfg(feature = "tta-lib")]
 fn embedded_ssh(launch: &LaunchConfig, trailing: &[String], ssh_options: Vec<String>) -> eyre::Result<()> {
-    use tta_launcher::{socket, target};
-    use tta_runner::command::Execute;
+    use tta_command::Handoff;
+    use tta_launcher::entry::{
+        EntryAttempt, context,
+        protocol::{AttemptOutcome, EntryIntent, ViewPreference, Waiting},
+    };
+    let destination = launch.ssh.clone().expect("SSH worker");
     let ssh = tta_runner::ssh::Ssh::builder()
-        .destination(launch.ssh.clone().expect("SSH worker"))
+        .destination(destination.clone())
         .options(ssh_options.into_iter().map(Into::into).collect())
         .build();
-    let setup = target::TargetSetup::builder()
+    let setup = tta_launcher::target::TargetSetup::builder()
         .maybe_shell(launch.shell.clone())
         .login(launch.login)
         .interactive(launch.interactive)
         .build();
-    let options = target::Options::builder()
-        .argument(launch.tmux_mode().expect("session target").session().into())
-        .maybe_roots(launch.session_root.as_ref().map(|root| vec![root.into()]))
-        .maybe_socket(launch.tmux_socket.as_ref().map(|path| socket::Selection::Path(path.into())))
-        .program(launch.tmux_program.clone().into())
-        .maybe_scaffold(launch.scaffold.clone())
-        .default_scaffold("default".into())
-        .grouped(launch.tmux_group)
-        .startup(trailing.iter().map(Into::into).collect())
-        .maybe_directory(launch.dir.as_ref().map(Into::into))
-        .build();
+    let cwd = std::env::current_dir()?;
+    let mut attempt = EntryAttempt::acquire(context::Acquisition {
+        scope: context::Scope {
+            origin: context::Origin::Ssh { host: destination, setup },
+            cwd: None,
+        },
+        // Only explicit target-side choices; target-local defaults come from
+        // target facts in the shared context policy, never local expansion.
+        overrides: context::Overrides {
+            roots: launch.session_root.as_ref().map(|root| vec![cwd.join(root)]),
+            socket: launch
+                .tmux_socket
+                .as_ref()
+                .map(|path| tta_launcher::socket::Selection::Path(cwd.join(path))),
+            program: Some(launch.tmux_program.clone().into()),
+            scaffold: launch.scaffold.clone(),
+            ..Default::default()
+        },
+        // Explicit grouping maps to Independent/Shared, never Auto.
+        intent: EntryIntent {
+            selector: launch.tmux_mode().expect("session target").session().to_owned(),
+            view: if launch.tmux_group { ViewPreference::Independent } else { ViewPreference::Shared },
+            directory: launch.dir.as_ref().map(|dir| cwd.join(dir)),
+            view_directory: launch.dir.as_ref().map(|dir| cwd.join(dir)),
+            startup: trailing.iter().map(Into::into).collect(),
+            ..EntryIntent::selector("replaced-by-selector-above")
+        },
+        default_scaffold: "default".into(),
+    })
+    .map_err(|error| eyre::eyre!("invalid entry invocation: {error}"))?;
+    let scope = match attempt.waiting() {
+        Waiting::Read(request) => (*request.scope).clone(),
+        _ => eyre::bail!("acquisition must start with a context read"),
+    };
     let limits = tta_runner::capture::Limits {
         timeout: std::time::Duration::from_millis(launch.ssh_probe_timeout.get()),
         per_stream: launch.ssh_probe_retention.get(),
         ..Default::default()
     };
-    let prepared = match tta_runner::ssh::prepare(ssh, setup, options, limits) {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            if let Err(write_error) = tta_runner::ssh::write_diagnostics(std::io::stderr().lock(), &error.observations) {
-                // Retain the planning cause even if the diagnostic sink failed.
-                eprintln!("cannot write SSH probe diagnostics: {write_error}");
-            }
-            return Err(error.into());
-        }
-    };
+    let mut observer = tta_runner::observe::ssh::Ssh::acquire(ssh, scope, limits).map_err(|error| eyre::eyre!("{error:#}"))?;
+    // One terminal effect dispatched through the same frozen connection and
+    // setup that answered every read. Proxy/retry policy stays owned here; a
+    // user retry builds a fresh attempt with fresh observations.
+    let snapshot = tta_runner::execute::ssh::drive(&mut attempt, &mut observer, false, Handoff::Exec)
+        .map_err(|error| eyre::eyre!("SSH entry attempt failed: {error:#}"))?;
     // Keep probe diagnostics off the framed stdout and visible in the PTY log.
-    tta_runner::ssh::write_diagnostics(std::io::stderr().lock(), &prepared.observations)?;
-    // No backend fallback after this boundary. A transport failure may follow
-    // mutation; proxy/retry policy is still owned by term-preserver.
-    let status = tta_command::Expression::from(prepared.command()?).execute(tta_command::Handoff::Exec)?;
-    std::process::exit(status.map(crate::session::exit_code_from_status).unwrap_or(0));
+    tta_runner::observe::ssh::write_diagnostics(std::io::stderr().lock(), &observer.observations)?;
+    match snapshot.outcome {
+        Some(AttemptOutcome::Stopped { cause, .. }) => Err(eyre::eyre!("SSH planning stopped before mutation: {cause:#}")),
+        Some(AttemptOutcome::Cancelled { boundary, .. }) => Err(eyre::eyre!("SSH entry attempt cancelled at {boundary}")),
+        None => eyre::bail!("SSH attempt ended without an outcome at {}", snapshot.leaf),
+        // A completed terminal effect under exec cannot happen (exec never
+        // returns on success); reaching here means the block ran to a status.
+        Some(AttemptOutcome::Completed { effects }) => std::process::exit(
+            effects
+                .finished
+                .last()
+                .and_then(|(_, receipt)| match receipt {
+                    tta_launcher::entry::protocol::EffectReceipt::Terminal { code } => *code,
+                    _ => None,
+                })
+                .map_or(0, |code| code.clamp(0, 255)),
+        ),
+        Some(AttemptOutcome::Delegated { .. }) | Some(AttemptOutcome::Exported(_)) => std::process::exit(0),
+    }
 }
 
 // Explicit -S freezes endpoint identity but unlike -L does not create tmux's
@@ -458,54 +495,89 @@ fn exec_argv(argv: Vec<String>) -> eyre::Result<()> {
 
 #[cfg(feature = "tta-lib")]
 fn embedded_tta(launch: &LaunchConfig, trailing: &[String]) -> eyre::Result<()> {
-    use tta_runner::execution::{ExecuteLaunch, LaunchBackend};
-    use tta_runner::{backend, socket};
-    let context = socket::context()?;
-    let socket = context.resolve(&socket::Selection::Path(launch.tmux_socket.as_ref().unwrap().into()))?;
-    let mode = socket::client_mode(&context, &socket.path)?;
-    let (lookup, execution): (Box<dyn backend::SessionLookup>, LaunchBackend) = match std::env::var("TTA_BACKEND").as_deref() {
-        Ok("cli") => (
-            Box::new(backend::Cli {
-                program: launch.tmux_program.clone().into(),
-                socket: socket.path.clone(),
-            }),
-            LaunchBackend::Cli,
-        ),
-        Err(std::env::VarError::NotPresent) | Ok("") | Ok("native") => (
-            Box::new(backend::Native {
-                endpoint: tmax::endpoint::Tmux::new().socket_path(&socket.path),
-            }),
-            LaunchBackend::Native,
-        ),
-        _ => {
-            eyre::bail!("TTA_BACKEND must be native or cli");
-        }
+    use tta_command::Handoff;
+    use tta_launcher::entry::{
+        EntryAttempt, context,
+        protocol::{AttemptOutcome, Delivery, EntryIntent, ViewPreference, Waiting},
     };
-    let roots = project_roots(launch)?;
-    let choice = scaffold_choice(launch)?;
-    let startup: Vec<std::ffi::OsString> = trailing.iter().map(Into::into).collect();
-    let directory = launch.dir.as_ref().map(|d| context.cwd.join(d));
+    let cwd = std::env::current_dir()?;
+    let native = match std::env::var("TTA_BACKEND").as_deref() {
+        Ok("cli") => false,
+        Err(std::env::VarError::NotPresent) | Ok("") | Ok("native") => true,
+        _ => eyre::bail!("TTA_BACKEND must be native or cli"),
+    };
     let program = if launch.tmux_program.contains('/') {
-        context.cwd.join(&launch.tmux_program).into_os_string()
+        cwd.join(&launch.tmux_program).into_os_string()
     } else {
         launch.tmux_program.clone().into()
     };
-    let config = std::env::var_os("TTA_TMUX_CONFIG").filter(|s| !s.is_empty()).map(|p| context.cwd.join(p));
-    let prepared = tta_runner::prepare()
-        .lookup(lookup.as_ref())
-        .argument(launch.tmux_mode().as_ref().unwrap().session())
-        .roots(&roots)
-        .choice(&choice)
-        .socket(&socket)
-        .client_mode(mode)
-        .program(&program)
-        .grouped(launch.tmux_group)
-        .startup(&startup)
-        .maybe_directory(directory.as_deref())
-        .maybe_tmux_config(config.as_deref())
-        .call()?;
-    let status = prepared.plan.execute(execution, tta_command::Handoff::Exec)?;
-    std::process::exit(status.map(crate::session::exit_code_from_status).unwrap_or(0));
+    let config = std::env::var_os("TTA_TMUX_CONFIG").filter(|s| !s.is_empty()).map(|p| cwd.join(p));
+    let mut attempt = EntryAttempt::acquire(context::Acquisition {
+        scope: context::Scope {
+            origin: context::Origin::Local { host: "local".into() },
+            cwd: None,
+        },
+        overrides: context::Overrides {
+            // The consumer keeps its own independent ordered-roots policy and
+            // supplies the resolved list explicitly.
+            roots: Some(project_roots(launch)?),
+            socket: Some(tta_launcher::socket::Selection::Path(
+                launch.tmux_socket.as_ref().expect("normalized socket").into(),
+            )),
+            program: Some(program),
+            config,
+            scaffold: Some(scaffold_choice(launch)?),
+            ..Default::default()
+        },
+        // Explicit grouping maps to Independent/Shared, never Auto.
+        intent: EntryIntent {
+            selector: launch.tmux_mode().expect("session target").session().to_owned(),
+            view: if launch.tmux_group { ViewPreference::Independent } else { ViewPreference::Shared },
+            directory: launch.dir.as_ref().map(|dir| cwd.join(dir)),
+            view_directory: launch.dir.as_ref().map(|dir| cwd.join(dir)),
+            startup: trailing.iter().map(Into::into).collect(),
+            ..EntryIntent::selector("replaced-by-selector-above")
+        },
+        default_scaffold: "default".into(),
+    })
+    .map_err(|error| eyre::eyre!("invalid entry invocation: {error}"))?;
+    let scope = match attempt.waiting() {
+        Waiting::Read(request) => (*request.scope).clone(),
+        _ => eyre::bail!("acquisition must start with a context read"),
+    };
+    let mut sessions = if native {
+        tta_runner::observe::local::SessionBackend::Native
+    } else {
+        tta_runner::observe::local::SessionBackend::Cli
+    };
+    let mut observer = tta_runner::observe::local::Local::acquire(scope, &mut sessions).map_err(|error| eyre::eyre!("{error:#}"))?;
+    let mut executor = tta_runner::execute::local::Local::default();
+    // The worker's final exec replaces this process with the real client; a
+    // user retry runs this worker again, building a fresh attempt.
+    let snapshot = tta_runner::execute::drive(
+        &mut attempt,
+        &mut observer,
+        &mut executor,
+        Delivery::Execute { native },
+        Handoff::Exec,
+    )
+    .map_err(|error| eyre::eyre!("entry attempt failed: {error:#}"))?;
+    match snapshot.outcome {
+        Some(AttemptOutcome::Stopped { cause, .. }) => Err(eyre::eyre!("tmux launch failed; do not replay a possibly executed mutation: {cause:#}")),
+        Some(AttemptOutcome::Cancelled { boundary, .. }) => Err(eyre::eyre!("entry attempt cancelled at {boundary}")),
+        None => eyre::bail!("entry attempt ended without an outcome at {}", snapshot.leaf),
+        Some(AttemptOutcome::Completed { effects }) => std::process::exit(
+            effects
+                .finished
+                .last()
+                .and_then(|(_, receipt)| match receipt {
+                    tta_launcher::entry::protocol::EffectReceipt::Terminal { code } => *code,
+                    _ => None,
+                })
+                .map_or(0, |code| code.clamp(0, 255)),
+        ),
+        Some(AttemptOutcome::Delegated { .. }) | Some(AttemptOutcome::Exported(_)) => std::process::exit(0),
+    }
 }
 
 /// Ordered project roots for tta project matching: `--session-root`, then
