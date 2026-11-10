@@ -252,12 +252,13 @@ fn explicit_positive_scaffold_refuses_classic_but_off_allows_it() {
     classic.session_backend = SessionBackend::ClassicTmuxCli;
     classic.scaffold = Some("rk".into());
     let error = select_backend(&classic, true).expect_err("positive scaffold cannot ride classic");
-    assert!(format!("{error:#}").contains("requires a tta backend"), "{error:#}");
+    let expected = if cfg!(feature = "classic-tmux-cli") { "requires a tta backend" } else { "was not compiled" };
+    assert!(format!("{error:#}").contains(expected), "{error:#}");
 
     // The whole off vocabulary opts back into classic semantics.
     for off in ["false", "0", "off", "none"] {
         classic.scaffold = Some(off.into());
-        assert!(select_backend(&classic, true).is_ok(), "--scaffold={off} must still allow classic");
+        assert_eq!(select_backend(&classic, true).is_ok(), cfg!(feature = "classic-tmux-cli"), "--scaffold={off} allows classic only when that backend is compiled");
     }
 }
 

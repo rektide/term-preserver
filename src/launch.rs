@@ -861,6 +861,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn ssh_user_mux_detected_from_effective_config() {
         let stub = tempfile::tempdir().unwrap();
         stub_ssh(
@@ -871,6 +872,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn ssh_user_mux_absent_without_path_or_master() {
         // Defaults: controlmaster false and no controlpath line at all.
         let stub = tempfile::tempdir().unwrap();
@@ -882,6 +884,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn ssh_control_options_tags_along_on_user_mux() {
         let stub = tempfile::tempdir().unwrap();
         stub_ssh(stub.path(), "hostname w\ncontrolmaster yes\ncontrolpath /home/me/cm/%C\n");
@@ -906,6 +909,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn ssh_control_options_creates_managed_directory_and_options() {
         let stub = tempfile::tempdir().unwrap();
         stub_ssh(stub.path(), "hostname w\ncontrolmaster false\ncontrolpersist no\n");
