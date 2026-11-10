@@ -204,20 +204,65 @@ fn session_names(launch: &LaunchConfig) -> eyre::Result<Vec<String>> {
 /// does: `TTA_BACKEND=cli` shells out, anything else native.
 #[cfg(feature = "tta-lib")]
 fn embedded_sessions(launch: &LaunchConfig, socket: &Path) -> eyre::Result<Vec<String>> {
-    use tta_runner::backend::{self, SessionLookup};
-    let lookup: Box<dyn SessionLookup> = match std::env::var("TTA_BACKEND").as_deref() {
-        Ok("cli") => Box::new(backend::Cli {
-            program: launch.tmux_program.clone().into(),
-            socket: socket.to_path_buf(),
-        }),
-        Err(std::env::VarError::NotPresent) | Ok("") | Ok("native") => Box::new(backend::Native {
-            endpoint: tmax::endpoint::Tmux::new().socket_path(socket),
-        }),
+    let report = embedded_catalog(launch, Some(socket))?;
+    for source in &report.sources {
+        if matches!(source.request.kind, tta_launcher::entry::protocol::ReadKind::Sessions { .. }) {
+            if let Err(error) = &source.result {
+                return Err(eyre::eyre!("session catalog failed: {error:#}"));
+            }
+        }
+    }
+    Ok(report
+        .workspaces
+        .into_iter()
+        .flat_map(|work| work.views.into_iter().map(|view| view.fingerprint.name))
+        .collect())
+}
+
+#[cfg(feature = "tta-lib")]
+fn embedded_catalog(launch: &LaunchConfig, socket: Option<&Path>) -> eyre::Result<tta_launcher::entry::catalog::Report> {
+    use tta_launcher::entry::{catalog, context, protocol::ReadKind};
+    use tta_runner::observe::{
+        self,
+        local::{Local, SessionBackend},
+    };
+    let mut sessions = match std::env::var("TTA_BACKEND").as_deref() {
+        Ok("cli") => SessionBackend::Cli,
+        Err(std::env::VarError::NotPresent) | Ok("") | Ok("native") => SessionBackend::Native,
         _ => {
             eyre::bail!("TTA_BACKEND must be native or cli");
         }
     };
-    Ok(lookup.sessions()?.into_iter().map(|session| session.name).collect())
+    let scope = context::Scope {
+        origin: context::Origin::Local { host: "local".into() },
+        cwd: None,
+    };
+    let roots = crate::launcher::project_roots(launch)?;
+    let mut query = catalog::CatalogQuery::acquire(catalog::Input {
+        scope: scope.clone(),
+        overrides: context::Overrides {
+            roots: (!roots.is_empty()).then_some(roots),
+            socket: socket.map(|path| tta_launcher::socket::Selection::Path(path.into())),
+            program: Some(launch.tmux_program.clone().into()),
+            ..Default::default()
+        },
+    });
+    let mut observer = Local::acquire(scope, &mut sessions).map_err(|e| eyre::eyre!("{e:#}"))?;
+    observe::drive_reads(&mut query, &mut observer)?;
+    let catalog::Waiting::Finished(catalog::Outcome::Report(report)) = query.waiting() else {
+        eyre::bail!("catalog did not finish");
+    };
+    if let Some(error) = report.errors.first() {
+        return Err(eyre::eyre!("catalog policy failed: {error:#}"));
+    }
+    for source in &report.sources {
+        if matches!(source.request.kind, ReadKind::Registry { .. }) {
+            if let Err(error) = &source.result {
+                return Err(eyre::eyre!("registry catalog failed: {error:#}"));
+            }
+        }
+    }
+    Ok(*report.clone())
 }
 
 /// Forward the endpoint to the installed tta's own candidate protocol.
@@ -292,12 +337,12 @@ fn cli_sessions(launch: &LaunchConfig, socket: &Path) -> eyre::Result<Vec<String
 fn scaffold_names(launch: &LaunchConfig) -> eyre::Result<Vec<String>> {
     match effective_backend(launch) {
         Ok(SessionBackend::TtaCli) => cli_scaffold_names(launch),
-        Ok(SessionBackend::TtaLib) => embedded_scaffold_names(),
+        Ok(SessionBackend::TtaLib) => embedded_scaffold_names(launch),
         // Classic or unresolved: either registry window still answers;
         // prefer the in-process registry, else the CLI, else nothing.
         _ => {
             if cfg!(feature = "tta-lib") {
-                embedded_scaffold_names()
+                embedded_scaffold_names(launch)
             } else if cfg!(feature = "tta-cli") {
                 cli_scaffold_names(launch)
             } else {
@@ -308,13 +353,12 @@ fn scaffold_names(launch: &LaunchConfig) -> eyre::Result<Vec<String>> {
 }
 
 #[cfg(feature = "tta-lib")]
-fn embedded_scaffold_names() -> eyre::Result<Vec<String>> {
-    let config = tta_runner::scaffold::load_config().map_err(tta_launcher::scaffold::Error::from)?;
-    Ok(config.names())
+fn embedded_scaffold_names(launch: &LaunchConfig) -> eyre::Result<Vec<String>> {
+    Ok(embedded_catalog(launch, None)?.generators)
 }
 
 #[cfg(not(feature = "tta-lib"))]
-fn embedded_scaffold_names() -> eyre::Result<Vec<String>> {
+fn embedded_scaffold_names(_launch: &LaunchConfig) -> eyre::Result<Vec<String>> {
     Ok(Vec::new())
 }
 

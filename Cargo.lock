@@ -1063,7 +1063,7 @@ dependencies = [
 
 [[package]]
 name = "tta-command"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bon",
  "thiserror",
@@ -1071,7 +1071,7 @@ dependencies = [
 
 [[package]]
 name = "tta-launcher"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "bon",
@@ -1080,7 +1080,6 @@ dependencies = [
  "thiserror",
  "tmax",
  "toml",
- "tracing",
  "tta-command",
  "tta-scaffold-rekon",
  "tta-scaffold-rekon-native",
@@ -1089,7 +1088,7 @@ dependencies = [
 
 [[package]]
 name = "tta-runner"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "bon",
@@ -1103,7 +1102,7 @@ dependencies = [
 
 [[package]]
 name = "tta-scaffold-rekon"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "thiserror",
  "toml",
@@ -1112,7 +1111,7 @@ dependencies = [
 
 [[package]]
 name = "tta-scaffold-rekon-native"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "serde",
  "serde_json",

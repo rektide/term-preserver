@@ -388,8 +388,9 @@ pub fn execute_worker(json: &str) -> eyre::Result<()> {
 fn embedded_ssh(launch: &LaunchConfig, trailing: &[String], ssh_options: Vec<String>) -> eyre::Result<()> {
     use tta_command::Handoff;
     use tta_launcher::entry::{
-        EntryAttempt, context,
+        context,
         protocol::{AttemptOutcome, EntryIntent, ViewPreference, Waiting},
+        EntryAttempt,
     };
     let destination = launch.ssh.clone().expect("SSH worker");
     let ssh = tta_runner::ssh::Ssh::builder()
@@ -401,7 +402,6 @@ fn embedded_ssh(launch: &LaunchConfig, trailing: &[String], ssh_options: Vec<Str
         .login(launch.login)
         .interactive(launch.interactive)
         .build();
-    let cwd = std::env::current_dir()?;
     let mut attempt = EntryAttempt::acquire(context::Acquisition {
         scope: context::Scope {
             origin: context::Origin::Ssh { host: destination, setup },
@@ -410,11 +410,11 @@ fn embedded_ssh(launch: &LaunchConfig, trailing: &[String], ssh_options: Vec<Str
         // Only explicit target-side choices; target-local defaults come from
         // target facts in the shared context policy, never local expansion.
         overrides: context::Overrides {
-            roots: launch.session_root.as_ref().map(|root| vec![cwd.join(root)]),
+            roots: launch.session_root.as_ref().map(|root| vec![PathBuf::from(root)]),
             socket: launch
                 .tmux_socket
                 .as_ref()
-                .map(|path| tta_launcher::socket::Selection::Path(cwd.join(path))),
+                .map(|path| tta_launcher::socket::Selection::Path(PathBuf::from(path))),
             program: Some(launch.tmux_program.clone().into()),
             scaffold: launch.scaffold.clone(),
             ..Default::default()
@@ -422,9 +422,13 @@ fn embedded_ssh(launch: &LaunchConfig, trailing: &[String], ssh_options: Vec<Str
         // Explicit grouping maps to Independent/Shared, never Auto.
         intent: EntryIntent {
             selector: launch.tmux_mode().expect("session target").session().to_owned(),
-            view: if launch.tmux_group { ViewPreference::Independent } else { ViewPreference::Shared },
-            directory: launch.dir.as_ref().map(|dir| cwd.join(dir)),
-            view_directory: launch.dir.as_ref().map(|dir| cwd.join(dir)),
+            view: if launch.tmux_group {
+                ViewPreference::Independent
+            } else {
+                ViewPreference::Shared
+            },
+            directory: launch.dir.as_ref().map(PathBuf::from),
+            view_directory: launch.dir.as_ref().map(PathBuf::from),
             startup: trailing.iter().map(Into::into).collect(),
             ..EntryIntent::selector("replaced-by-selector-above")
         },
@@ -449,7 +453,9 @@ fn embedded_ssh(launch: &LaunchConfig, trailing: &[String], ssh_options: Vec<Str
     // Keep probe diagnostics off the framed stdout and visible in the PTY log.
     tta_runner::observe::ssh::write_diagnostics(std::io::stderr().lock(), &observer.observations)?;
     match snapshot.outcome {
-        Some(AttemptOutcome::Stopped { cause, .. }) => Err(eyre::eyre!("SSH planning stopped before mutation: {cause:#}")),
+        Some(AttemptOutcome::Stopped { boundary, effects, cause }) => {
+            Err(eyre::eyre!("SSH entry stopped at {boundary}; retained effect knowledge {effects:?}: {cause:#}"))
+        }
         Some(AttemptOutcome::Cancelled { boundary, .. }) => Err(eyre::eyre!("SSH entry attempt cancelled at {boundary}")),
         None => eyre::bail!("SSH attempt ended without an outcome at {}", snapshot.leaf),
         // A completed terminal effect under exec cannot happen (exec never
@@ -497,8 +503,9 @@ fn exec_argv(argv: Vec<String>) -> eyre::Result<()> {
 fn embedded_tta(launch: &LaunchConfig, trailing: &[String]) -> eyre::Result<()> {
     use tta_command::Handoff;
     use tta_launcher::entry::{
-        EntryAttempt, context,
+        context,
         protocol::{AttemptOutcome, Delivery, EntryIntent, ViewPreference, Waiting},
+        EntryAttempt,
     };
     let cwd = std::env::current_dir()?;
     let native = match std::env::var("TTA_BACKEND").as_deref() {
@@ -532,7 +539,11 @@ fn embedded_tta(launch: &LaunchConfig, trailing: &[String]) -> eyre::Result<()> 
         // Explicit grouping maps to Independent/Shared, never Auto.
         intent: EntryIntent {
             selector: launch.tmux_mode().expect("session target").session().to_owned(),
-            view: if launch.tmux_group { ViewPreference::Independent } else { ViewPreference::Shared },
+            view: if launch.tmux_group {
+                ViewPreference::Independent
+            } else {
+                ViewPreference::Shared
+            },
             directory: launch.dir.as_ref().map(|dir| cwd.join(dir)),
             view_directory: launch.dir.as_ref().map(|dir| cwd.join(dir)),
             startup: trailing.iter().map(Into::into).collect(),
@@ -554,14 +565,8 @@ fn embedded_tta(launch: &LaunchConfig, trailing: &[String]) -> eyre::Result<()> 
     let mut executor = tta_runner::execute::local::Local::default();
     // The worker's final exec replaces this process with the real client; a
     // user retry runs this worker again, building a fresh attempt.
-    let snapshot = tta_runner::execute::drive(
-        &mut attempt,
-        &mut observer,
-        &mut executor,
-        Delivery::Execute { native },
-        Handoff::Exec,
-    )
-    .map_err(|error| eyre::eyre!("entry attempt failed: {error:#}"))?;
+    let snapshot = tta_runner::execute::drive(&mut attempt, &mut observer, &mut executor, Delivery::Execute { native }, Handoff::Exec)
+        .map_err(|error| eyre::eyre!("entry attempt failed: {error:#}"))?;
     match snapshot.outcome {
         Some(AttemptOutcome::Stopped { cause, .. }) => Err(eyre::eyre!("tmux launch failed; do not replay a possibly executed mutation: {cause:#}")),
         Some(AttemptOutcome::Cancelled { boundary, .. }) => Err(eyre::eyre!("entry attempt cancelled at {boundary}")),
