@@ -7,6 +7,8 @@ status: implemented
 author: model:openai/gpt-6-astra
 date: 2026-10-22
 sources:
+  - resource: opencode://ses_e3cf482d5ffeyD5hefdVDZGmbe
+    title: Adopt the 0.8.0 owned-entry-attempt call sites in this guide after the coordinated cutover
   - resource: opencode://ses_e3e3170d4ffeij7U00lUlwaZg7
     title: Adopt tta 0.7.0 list-valued APIs without claiming a new multi-root consumer UI; record the receiving checkpoint and scratch-bound test limit
   - resource: opencode://ses_e804f36ddffepWs5FSeXN6VDBv
@@ -23,8 +25,8 @@ sources:
     title: Availability policy and per-attempt launch worker
   - resource: /src/tmux.rs
     title: Shared endpoint and CLI/native observation
-  - resource: file:///home/rektide/src/tta/session/launcher/src/plan.rs
-    title: Shared grouped launch, initial directory and startup argv planning
+  - resource: file:///home/rektide/src/tta/session/launcher/src/entry/action.rs
+    title: Semantic entry decisions and literal action lowering shared by the embedded call sites
   - resource: file:///home/rektide/src/tta/session/launcher/src/scaffold.rs
     title: Shared generator registry, scaffold choice and create-prefix resolution
   - resource: file:///home/rektide/src/tmux-interface-control/README.md
@@ -33,11 +35,14 @@ sources:
 
 # Session launch backends
 
-The embedded tta dependency is now 0.7.0. Existing explicit `--session-root`
-values pass as one-element ordered lists; local root configuration/completion
-retains this consumer's existing single-root policy pending the multi-root surface
-integration. SSH without that explicit override uses target-local ordered-root
-defaults. The [library-side consumer account](file:///home/rektide/src/tta/doc/consumer/term-preserver.md)
+The embedded tta dependency is now **0.8.0**: both embedded call sites acquire
+one `tta_launcher::entry::EntryAttempt` and drive shared read/effect
+interpreters (`tta_runner::{observe, execute}`) — see
+[attempt ownership](#attempt-ownership-and-observation). Existing explicit
+`--session-root` values pass as explicit overrides; local root
+configuration/completion uses this consumer's shared ordered-roots helper.
+SSH without that explicit override uses target-local ordered-root defaults.
+The [library-side consumer account](file:///home/rektide/src/tta/doc/consumer/term-preserver.md)
 records the API adoption, receiving-lock check and current verification limit.
 
 `--tmux <target>` defaults to **tta when available**. tta selects an exact
@@ -103,7 +108,8 @@ The default `session_backend = "auto"` selects:
 
 Local executable detection occurs after the launch shell's startup files. The
 embedded SSH path does not check for target tta: it observes target inputs and
-prepares commands locally. Explicit SSH `tta-cli` and mosh retain their existing
+binds/decides locally, dispatching only the final terminal effect remotely.
+Explicit SSH `tta-cli` and mosh retain their existing
 remote executable carrier. Classic native tmux remains local-only. Embedded
 mosh is not yet supported; explicit selection reports an error without making
 the existing auto/CLI mosh path unusable.
@@ -214,11 +220,15 @@ default command/shell to run. A bare term-preserver still runs `$SHELL`.
 
 Local launching runs a small worker inside the child PTY, after shell setup.
 It resolves the target and replaces itself with the interactive tmux client.
-The embedded tta path calls `tta_runner::prepare()` and executes its prepared
-plan; shared workflow policy supplies satellite names from a fresh inventory
-rather than being reimplemented in this consumer. The CLI path executes tta.
-Neither replaces the parent proxy. Retrying starts a new worker, repeating
-discovery against current sessions rather than caching a resolved session ID.
+The embedded tta path acquires an `EntryAttempt` with explicit, presence-based
+overrides and an intent mapping `tmux_group` to `Independent`/`Shared` (never
+Auto), then drives `observe::local` and `execute::local` through
+`tta_runner::execute::drive`; the attempt itself owns selection, fresh
+binding, satellite allocation from a fresh inventory and effect order, so none
+of that policy is reimplemented in this consumer. The CLI path executes tta.
+Neither replaces the parent proxy. Retrying starts a new worker with a fresh
+attempt, repeating discovery against current sessions rather than caching a
+resolved session ID or replaying a previous mutation block.
 
 For **embedded SSH**, the worker stays local. It passes `--shell`, login and
 interactive policy to `TargetSetup`; when no shell was selected it uses target
@@ -226,8 +236,11 @@ SHELL, not local SHELL. The same setup applies to every bounded, read-only non-P
 probe and the final SSH PTY action. Target cwd/HOME/UID/root/config/registry/Git
 facts supply defaults, with explicit consumer settings winning. A fresh remote
 terminal attaches and cannot inherit authority to switch a local tmux client.
-No target tta is needed, including cold creation. The worker hands the prepared
-command to SSH; the parent retains its proxy, PTY and retry prompt.
+No target tta is needed, including cold creation. The worker freezes one
+`observe::ssh` observer over the consumer's SSH options and target setup, then
+dispatches the attempt's bound terminal effect through `execute::ssh::drive` —
+one terminal invocation sharing the exact connection and setup that answered
+every read; the parent retains its proxy, PTY and retry prompt.
 Bounded probe capture has closed stdin and an owned process group: keys/agent or
 an already authenticated master must supply authentication. A separate interactive
 password/passphrase bootstrap is not implemented or tested by this slice.
@@ -249,12 +262,15 @@ The parent's `ssh_control_options()` result is serialized once into the attempt
 request and shared unchanged by probes and handoff, along with the same OpenSSH
 config. No silently different connection/master policy is introduced. Startup
 noise, command diagnostics/status, malformed or truncated replies and capture
-incompleteness remain distinct. The shared `tta_runner::ssh::write_diagnostics`
+incompleteness remain distinct. The shared
+`tta_runner::observe::ssh::write_diagnostics`
 writer reports startup/trailing/transport/operation evidence on stderr, including
 prior successful probes and failed capture status/EOF/omissions/cleanup, before
-propagating the original prepare failure. Stdout stays clean.
+propagating the original acquisition failure. Stdout stays clean.
 Read failure stops before mutation; a failed
-scaffold/create prevents handoff. Grouped create → attach → `keep-last` remains
+scaffold/create prevents handoff, and a stopped attempt reports its boundary and
+retained effect knowledge rather than inviting a replay. Grouped create →
+attach → `keep-last` remains
 one tmux queue. After action start, transport loss may leave target mutation
 uncertain: no library fallback/replay/rollback/prune occurs. A **user-authorized**
 retry starts a new worker and fresh discovery, not the previous mutation block.
@@ -278,7 +294,7 @@ Native `tmax` owns server queries; the ordinary tmux client owns interactive
 terminal attachment and cold-server startup. Native classic discovery chooses
 the grouped-session target; shared observation uses native queries when that
 backend is selected. Explicit CLI remote backends and mosh retain their carriers;
-embedded SSH uses the prepared handoff described above.
+embedded SSH uses the bound terminal effect described above.
 
 The local sampler uses the launch socket and client executable. Client PID is
 the strongest correlation. tta fragments are never treated as exact fallback
